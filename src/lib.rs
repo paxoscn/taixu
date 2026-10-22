@@ -96,7 +96,7 @@ pub mod task;
 pub mod trade;
 pub mod wallet;
 
-pub use error::{GameError, Result};
+pub use error::{GameError, GameResult, Result};
 pub use game::{Game, GameConfig, GameState, MetricOutcome};
 pub use ids::{
     AccountId, AchievementId, AnnouncementId, CollectionId, CurrencyId, ItemId, LeaderboardId,
@@ -113,7 +113,9 @@ pub mod prelude {
     pub use crate::clock::{Clock, ManualClock, SystemClock};
     pub use crate::collection::{Collectible, CollectionDef, CollectionMilestone};
     pub use crate::cosmetics::{Avatar, SkinCategory, SkinDef};
-    pub use crate::error::{GameError, Result};
+    // `Result` is intentionally not exported: a glob import must not shadow
+    // `std::result::Result` inside trait implementations.
+    pub use crate::error::{GameError, GameResult};
     pub use crate::friend::FriendRequest;
     pub use crate::game::{Game, GameConfig, GameState, MetricOutcome};
     pub use crate::ids::*;

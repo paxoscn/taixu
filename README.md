@@ -38,7 +38,7 @@ taixu = "0.1"
 use std::collections::BTreeMap;
 use taixu::prelude::*;
 
-fn main() -> Result<()> {
+fn main() -> taixu::Result<()> {
     let game = Game::new();
 
     // 区域（服务器节点）与账号。账号由外部鉴权系统提供。

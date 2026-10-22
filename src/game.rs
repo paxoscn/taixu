@@ -10,7 +10,7 @@
 //! HTTP/WebSocket layer. Persistence is provided by serializing
 //! [`GameState`] snapshots (see [`crate::store`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use parking_lot::{RwLock, RwLockReadGuard};
@@ -33,7 +33,7 @@ use crate::ids::{
 };
 use crate::item::{Inventory, ItemCatalog, ItemDef};
 use crate::leaderboard::{Leaderboard, ScoreEntry};
-use crate::npc::{NearbyPlayer, NpcContext, NpcDef, NpcRegistry};
+use crate::npc::{NearbyPlayer, NpcAction, NpcContext, NpcDef, NpcRegistry, NpcTurn};
 use crate::region::{Region, RegionRegistry, RegionStatus};
 use crate::reward::{Cost, CurrencyGrant, Reward};
 use crate::room::{Room, RoomRegistry};
@@ -267,23 +267,14 @@ impl Game {
         let display_name = validate_display_name(display_name, self.config.max_name_len)?;
         let now = self.now_ms();
         let mut state = self.state.write();
-        if state.accounts.contains_key(&id) {
-            return Err(GameError::AccountAlreadyExists(id));
-        }
-        check_region_accepts(&state, &region, &id)?;
-        let account = Account::new(id.clone(), display_name, region.clone(), now);
-        state.regions.add_player(&region, &id)?;
-        state.accounts.insert(id.clone(), account.clone());
-        state.wallets.insert(id.clone(), Wallet::new());
-        state.inventories.insert(
-            id.clone(),
-            Inventory::new(self.config.default_inventory_capacity),
-        );
-        Ok(account)
+        create_account_locked(&mut state, id, display_name, region, now, &self.config)
     }
 
-    /// Return the account if it exists, otherwise create it. Useful when the
-    /// external auth layer may hand out ids lazily.
+    /// Return the account if it exists, otherwise create it.
+    ///
+    /// The existence check and creation happen under one write lock, so
+    /// concurrent first logins for the same id all resolve to one account
+    /// instead of racing with `AccountAlreadyExists`.
     pub fn ensure_account(
         &self,
         id: impl Into<AccountId>,
@@ -291,10 +282,14 @@ impl Game {
         region: impl Into<RegionId>,
     ) -> Result<Account> {
         let id = id.into();
-        if let Some(account) = self.state.read().accounts.get(&id) {
+        let region = region.into();
+        let now = self.now_ms();
+        let mut state = self.state.write();
+        if let Some(account) = state.accounts.get(&id) {
             return Ok(account.clone());
         }
-        self.create_account(id, display_name, region)
+        let display_name = validate_display_name(display_name, self.config.max_name_len)?;
+        create_account_locked(&mut state, id, display_name, region, now, &self.config)
     }
 
     pub fn account(&self, id: &AccountId) -> Result<Account> {
@@ -498,6 +493,7 @@ impl Game {
         if quantity == 0 {
             return Err(GameError::InvalidQuantity(quantity));
         }
+        let now = self.now_ms();
         let mut state = self.state.write();
         ensure_account_exists(&state, account)?;
         let def = state.items.require(item)?.clone();
@@ -506,6 +502,10 @@ impl Game {
             .entry(account.clone())
             .or_insert_with(|| Inventory::new(self.config.default_inventory_capacity))
             .try_add(&def, quantity)?;
+        // Capture item-based task completion at acquisition time so a task
+        // completed inside its deadline is not lost if it expires before the
+        // next query.
+        refresh_account_tasks(&mut state, account, now);
         Ok(())
     }
 
@@ -659,7 +659,7 @@ impl Game {
         let mut state = self.state.write();
         let mut assets = load_assets(&state, &self.config, account)?;
         apply_reward(&state, &mut assets, reward, now)?;
-        save_assets(&mut state, account, assets);
+        save_assets(&mut state, account, assets, now);
         Ok(())
     }
 
@@ -678,10 +678,13 @@ impl Game {
     /// Grant a skin. Returns `true` when it was newly acquired. Idempotent, so
     /// reward bundles may safely include already-owned skins.
     pub fn grant_skin(&self, account: &AccountId, skin: &SkinId) -> Result<bool> {
+        let now = self.now_ms();
         let mut state = self.state.write();
         ensure_account_exists(&state, account)?;
         state.skins.require(skin)?;
-        Ok(state.cosmetics.grant(account, skin.clone()))
+        let granted = state.cosmetics.grant(account, skin.clone());
+        refresh_account_tasks(&mut state, account, now);
+        Ok(granted)
     }
 
     pub fn owns_skin(&self, account: &AccountId, skin: &SkinId) -> Result<bool> {
@@ -892,7 +895,8 @@ impl Game {
                 "owner must belong to the room's region".into(),
             ));
         }
-        check_region_accepts(&state, region, owner)?;
+        // Maintenance keeps existing players active; only new entry is blocked.
+        check_region_activity(&state, region)?;
         state.rooms.create(
             owner.clone(),
             name.to_owned(),
@@ -945,7 +949,7 @@ impl Game {
                 "account and room belong to different regions".into(),
             ));
         }
-        check_region_accepts(&state, &room_info.region, account)?;
+        check_region_activity(&state, &room_info.region)?;
         state.rooms.join(account, room, now)?;
         Ok(state.rooms.require(room)?.clone())
     }
@@ -1050,6 +1054,7 @@ impl Game {
         let channel = normalize_channel(channel);
         let now = self.now_ms();
         let mut state = self.state.write();
+        validate_channel_targets(&state, &channel)?;
         state.chat.post(
             channel,
             ChatAuthor::System,
@@ -1226,7 +1231,7 @@ impl Game {
         state
             .shops
             .record_purchase(shop_id.clone(), offer_id.clone(), account.clone(), quantity);
-        save_assets(&mut state, account, assets);
+        save_assets(&mut state, account, assets, now);
 
         Ok(PurchaseReceipt {
             shop: shop_id.clone(),
@@ -1368,7 +1373,7 @@ impl Game {
         }
 
         let trade = state.trades.require(trade_id)?.clone();
-        match execute_trade(&mut state, &self.config, &trade) {
+        match execute_trade(&mut state, &self.config, &trade, now) {
             Ok(()) => {
                 let trade = state.trades.get_mut(trade_id).expect("trade checked");
                 trade.state = TradeState::Completed;
@@ -1468,7 +1473,7 @@ impl Game {
         state
             .collections
             .mark_claimed(account, collection, milestone);
-        save_assets(&mut state, account, assets);
+        save_assets(&mut state, account, assets, now);
         Ok(milestone_def.reward)
     }
 
@@ -1569,7 +1574,7 @@ impl Game {
         let mut assets = load_assets(&state, &self.config, account)?;
         apply_reward(&state, &mut assets, &def.reward, now)?;
         state.achievements.mark_claimed(account, achievement);
-        save_assets(&mut state, account, assets);
+        save_assets(&mut state, account, assets, now);
         Ok(def.reward)
     }
 
@@ -1724,7 +1729,7 @@ impl Game {
         if let Some(progress) = state.tasks.progress_mut(account, id) {
             progress.claimed_at_ms = Some(now);
         }
-        save_assets(&mut state, account, assets);
+        save_assets(&mut state, account, assets, now);
         Ok(def.reward)
     }
 
@@ -2076,6 +2081,146 @@ impl Game {
             now_ms: now,
         })
     }
+
+    /// Apply a complete NPC turn atomically.
+    ///
+    /// Rewards, leaderboard updates, the player's message and all NPC messages
+    /// are committed under one write lock. Every action and message is
+    /// validated first, so a failing action leaves no partial side effects.
+    ///
+    /// [`crate::npc::NpcRuntime::converse`] uses this method after the agent
+    /// responds; hosts may call it directly when they generate actions
+    /// themselves.
+    pub fn apply_npc_turn(
+        &self,
+        npc_id: &NpcId,
+        speaker: &AccountId,
+        channel: ChatChannel,
+        player_message: &str,
+        actions: &[NpcAction],
+        npc_messages: &[String],
+    ) -> Result<NpcTurn> {
+        let channel = normalize_channel(channel);
+        let now = self.now_ms();
+        let mut state = self.state.write();
+        ensure_account_exists(&state, speaker)?;
+        let npc = state.npcs.require(npc_id)?.clone();
+        if !npc.enabled {
+            return Err(GameError::NpcDisabled(npc_id.clone()));
+        }
+        if npc.channel() != channel {
+            return Err(GameError::ChannelAccessDenied(channel));
+        }
+        if let Some(room) = &npc.room {
+            state.rooms.require(room)?;
+        }
+        if let Some(region) = &npc.region {
+            state.regions.require(region)?;
+        }
+        check_channel_access(&state, speaker, &channel)?;
+
+        let max_len = self.config.max_chat_message_len;
+        validate_chat_body(player_message, max_len)?;
+        for message in npc_messages {
+            validate_chat_body(message, max_len)?;
+        }
+
+        let allowed_accounts = npc_allowed_accounts(&state, &npc, speaker);
+        let mut applied_actions = 0usize;
+        for action in actions {
+            match action {
+                NpcAction::Say { text } => validate_chat_body(text, max_len)?,
+                NpcAction::GiveReward { account, .. } => {
+                    if !allowed_accounts.contains(account) {
+                        return Err(GameError::InvalidInput(format!(
+                            "npc reward target {account} is not in the npc context"
+                        )));
+                    }
+                    ensure_account_exists(&state, account)?;
+                    applied_actions += 1;
+                }
+                NpcAction::SetScore {
+                    leaderboard,
+                    account,
+                    ..
+                } => {
+                    if !allowed_accounts.contains(account) {
+                        return Err(GameError::InvalidInput(format!(
+                            "npc score target {account} is not in the npc context"
+                        )));
+                    }
+                    ensure_account_exists(&state, account)?;
+                    if !state.leaderboards.contains_key(leaderboard) {
+                        return Err(GameError::LeaderboardNotFound(leaderboard.clone()));
+                    }
+                    applied_actions += 1;
+                }
+            }
+        }
+
+        // All fallible action work happens on cloned assets first. Nothing
+        // below this point can fail after a shared mutation.
+        let mut assets_by_account: BTreeMap<AccountId, AccountAssets> = BTreeMap::new();
+        for action in actions {
+            if let NpcAction::GiveReward { account, reward } = action {
+                if !assets_by_account.contains_key(account) {
+                    assets_by_account
+                        .insert(account.clone(), load_assets(&state, &self.config, account)?);
+                }
+                apply_reward(
+                    &state,
+                    assets_by_account
+                        .get_mut(account)
+                        .expect("assets inserted above"),
+                    reward,
+                    now,
+                )?;
+            }
+        }
+
+        let player_chat = state.chat.post(
+            channel.clone(),
+            ChatAuthor::account(speaker.clone()),
+            player_message,
+            BTreeMap::new(),
+            now,
+            max_len,
+        )?;
+        let mut npc_chat_messages = Vec::with_capacity(npc_messages.len());
+        for message in npc_messages {
+            npc_chat_messages.push(state.chat.post(
+                channel.clone(),
+                ChatAuthor::npc(npc_id.clone()),
+                message,
+                BTreeMap::new(),
+                now,
+                max_len,
+            )?);
+        }
+
+        for (account, assets) in assets_by_account {
+            save_assets(&mut state, &account, assets, now);
+        }
+        for action in actions {
+            if let NpcAction::SetScore {
+                leaderboard,
+                account,
+                score,
+            } = action
+            {
+                if let Some(board) = state.leaderboards.get_mut(leaderboard) {
+                    board.set_score(account.clone(), *score, now);
+                }
+            }
+        }
+
+        Ok(NpcTurn {
+            channel,
+            player_message: player_chat,
+            npc_messages: npc_chat_messages,
+            applied_actions,
+        })
+    }
 }
 
 // =========================================================================
@@ -2090,12 +2235,47 @@ struct AccountAssets {
     xp: u64,
 }
 
+fn create_account_locked(
+    state: &mut GameState,
+    id: AccountId,
+    display_name: String,
+    region: RegionId,
+    now_ms: i64,
+    config: &GameConfig,
+) -> Result<Account> {
+    if state.accounts.contains_key(&id) {
+        return Err(GameError::AccountAlreadyExists(id));
+    }
+    check_region_accepts(state, &region, &id)?;
+    let account = Account::new(id.clone(), display_name, region.clone(), now_ms);
+    state.regions.add_player(&region, &id)?;
+    state.accounts.insert(id.clone(), account.clone());
+    state.wallets.insert(id.clone(), Wallet::new());
+    state.inventories.insert(
+        id.clone(),
+        Inventory::new(config.default_inventory_capacity),
+    );
+    Ok(account)
+}
+
 fn ensure_account_exists(state: &GameState, account: &AccountId) -> Result<()> {
     if state.accounts.contains_key(account) {
         Ok(())
     } else {
         Err(GameError::AccountNotFound(account.clone()))
     }
+}
+
+/// Activities performed by accounts already assigned to a region.
+///
+/// `Maintenance` keeps existing players playing but blocks new entry
+/// (`check_region_accepts`); `Closed` blocks everything.
+fn check_region_activity(state: &GameState, region_id: &RegionId) -> Result<()> {
+    let region = state.regions.require(region_id)?;
+    if region.status == RegionStatus::Closed {
+        return Err(GameError::RegionNotOpen(region_id.clone()));
+    }
+    Ok(())
 }
 
 fn check_region_accepts(
@@ -2118,6 +2298,60 @@ fn normalize_channel(channel: ChatChannel) -> ChatChannel {
         ChatChannel::Private { a, b } => ChatChannel::private(a, b),
         other => other,
     }
+}
+
+/// Validate that a channel points at existing entities. Used by operator
+/// messages, which have no account identity to derive access from.
+fn validate_channel_targets(state: &GameState, channel: &ChatChannel) -> Result<()> {
+    match channel {
+        ChatChannel::Global => Ok(()),
+        ChatChannel::Region(region) => state.regions.require(region).map(|_| ()),
+        ChatChannel::Room(room) => state.rooms.require(room).map(|_| ()),
+        ChatChannel::Private { a, b } => {
+            if a == b {
+                return Err(GameError::InvalidInput(
+                    "cannot open a private chat with yourself".into(),
+                ));
+            }
+            ensure_account_exists(state, a)?;
+            ensure_account_exists(state, b)
+        }
+    }
+}
+
+fn validate_chat_body(body: &str, max_len: usize) -> Result<()> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(GameError::EmptyContent);
+    }
+    if body.chars().count() > max_len {
+        return Err(GameError::ContentTooLong { max: max_len });
+    }
+    Ok(())
+}
+
+/// Accounts an NPC may act upon: the speaker plus players in its room/region.
+fn npc_allowed_accounts(
+    state: &GameState,
+    npc: &NpcDef,
+    speaker: &AccountId,
+) -> BTreeSet<AccountId> {
+    let mut allowed = BTreeSet::new();
+    allowed.insert(speaker.clone());
+    match npc.channel() {
+        ChatChannel::Room(room_id) => {
+            if let Some(room) = state.rooms.get(&room_id) {
+                allowed.extend(room.players.iter().cloned());
+            }
+        }
+        ChatChannel::Region(region_id) => {
+            if let Some(region) = state.regions.get(&region_id) {
+                allowed.extend(region.players.iter().cloned());
+            }
+        }
+        ChatChannel::Global | ChatChannel::Private { .. } => {}
+    }
+    allowed
 }
 
 fn check_channel_access(
@@ -2214,13 +2448,16 @@ fn load_assets(
     })
 }
 
-fn save_assets(state: &mut GameState, account: &AccountId, assets: AccountAssets) {
+fn save_assets(state: &mut GameState, account: &AccountId, assets: AccountAssets, now_ms: i64) {
     state.wallets.insert(account.clone(), assets.wallet);
     state.inventories.insert(account.clone(), assets.inventory);
     *state.cosmetics.owned_mut(account) = assets.owned_skins;
     if let Some(account_info) = state.accounts.get_mut(account) {
         account_info.xp = assets.xp;
     }
+    // Any item/skin/achievement objective that became satisfied as part of
+    // this commit is stamped now, while it is still observable.
+    refresh_account_tasks(state, account, now_ms);
 }
 
 fn apply_reward(
@@ -2281,7 +2518,12 @@ fn ensure_trade_open(state: &mut GameState, trade: &Trade, now_ms: i64) -> Resul
     Ok(())
 }
 
-fn execute_trade(state: &mut GameState, config: &GameConfig, trade: &Trade) -> Result<()> {
+fn execute_trade(
+    state: &mut GameState,
+    config: &GameConfig,
+    trade: &Trade,
+    now_ms: i64,
+) -> Result<()> {
     if trade.initiator_side.is_empty() && trade.partner_side.is_empty() {
         return Err(GameError::EmptyTrade);
     }
@@ -2318,8 +2560,8 @@ fn execute_trade(state: &mut GameState, config: &GameConfig, trade: &Trade) -> R
         .wallet
         .add_currencies(&currency_grants(&trade.initiator_side.currencies))?;
 
-    save_assets(state, &trade.initiator, initiator);
-    save_assets(state, &trade.partner, partner);
+    save_assets(state, &trade.initiator, initiator, now_ms);
+    save_assets(state, &trade.partner, partner, now_ms);
     Ok(())
 }
 

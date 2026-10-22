@@ -10,6 +10,10 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, GameError>;
 
+/// Unambiguous alias for hosts and trait implementations. The prelude exports
+/// this instead of `Result` so a glob import cannot shadow `std::result::Result`.
+pub type GameResult<T> = std::result::Result<T, GameError>;
+
 #[derive(Debug, Error)]
 pub enum GameError {
     // ---- accounts & regions -------------------------------------------------

@@ -572,10 +572,7 @@ fn npc_runtime_applies_actions() {
     struct ShopkeeperAgent;
     #[async_trait::async_trait]
     impl NpcAgent for ShopkeeperAgent {
-        async fn respond(
-            &self,
-            context: &NpcContext,
-        ) -> std::result::Result<NpcDecision, NpcError> {
+        async fn respond(&self, context: &NpcContext) -> Result<NpcDecision, NpcError> {
             Ok(NpcDecision {
                 reply: Some("A gift for you.".into()),
                 actions: vec![
