@@ -48,17 +48,29 @@ use crate::wallet::{ResourceCatalog, ResourceDef, Wallet, WalletSnapshot};
 /// Tunable limits for a game instance.
 #[derive(Clone, Debug)]
 pub struct GameConfig {
+    /// Inventory slots assigned to new accounts and missing inventories.
     pub default_inventory_capacity: usize,
+    /// Upper bound accepted by `set_inventory_capacity`.
     pub max_inventory_capacity: usize,
+    /// Maximum capacity accepted by `create_room`.
     pub max_room_capacity: usize,
+    /// Maximum character count for account and room names.
     pub max_name_len: usize,
+    /// Maximum character count for chat and NPC messages.
     pub max_chat_message_len: usize,
+    /// Messages retained per channel; fixed when the `ChatService` is built.
     pub chat_history_per_channel: usize,
+    /// New-trade lifetime in seconds (`expire_trades` applies it lazily).
     pub trade_expiry_secs: u64,
+    /// Recent channel messages injected into an NPC context.
     pub npc_context_messages: usize,
+    /// Maximum nearby players injected into an NPC context.
     pub npc_nearby_limit: usize,
+    /// Maximum character count for a friend-request message.
     pub max_friend_request_len: usize,
+    /// Maximum character count for an avatar title.
     pub max_avatar_title_len: usize,
+    /// Maximum character count for an avatar image identifier/URL.
     pub max_avatar_image_len: usize,
 }
 

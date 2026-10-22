@@ -75,6 +75,11 @@
 //! * **NPC agents are async and external.** Register them on [`npc::NpcRuntime`];
 //!   they are not part of the serialized state.
 
+/// Compiles every Rust code block in the README as a doctest.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 pub mod account;
 pub mod achievement;
 pub mod announcement;
