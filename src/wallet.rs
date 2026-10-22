@@ -97,6 +97,12 @@ impl ResourceCatalog {
 struct ResourcePool {
     amount: Amount,
     updated_at_ms: i64,
+    /// Fractional regeneration progress, in units of
+    /// `elapsed_ms * regen_per_hour` modulo one hour. Persisting the
+    /// remainder prevents both drift and double-counting when the balance is
+    /// read repeatedly at the same timestamp.
+    #[serde(default)]
+    regen_remainder: u64,
 }
 
 /// Per-account balance of currencies and resources.
@@ -277,6 +283,7 @@ impl Wallet {
             ResourcePool {
                 amount,
                 updated_at_ms: now_ms,
+                regen_remainder: 0,
             },
         );
         amount
@@ -316,8 +323,10 @@ impl Wallet {
             .or_insert(ResourcePool {
                 amount: 0,
                 updated_at_ms: now_ms,
+                regen_remainder: 0,
             });
 
+        // Reading at the same (or an earlier) timestamp must be a no-op.
         if now_ms <= pool.updated_at_ms {
             return pool.amount;
         }
@@ -327,6 +336,7 @@ impl Wallet {
                 pool.amount = pool.amount.min(cap);
             }
             pool.updated_at_ms = now_ms;
+            pool.regen_remainder = 0;
             return pool.amount;
         }
 
@@ -334,14 +344,25 @@ impl Wallet {
             if pool.amount >= cap {
                 pool.amount = cap;
                 pool.updated_at_ms = now_ms;
+                pool.regen_remainder = 0;
                 return pool.amount;
             }
         }
 
         let elapsed_ms = (now_ms - pool.updated_at_ms) as u128;
-        let gained = elapsed_ms * def.regen_per_hour as u128 / MS_PER_HOUR;
+        let total = elapsed_ms
+            .saturating_mul(def.regen_per_hour as u128)
+            .saturating_add(pool.regen_remainder as u128);
+        let gained = total / MS_PER_HOUR;
+        let remainder = (total % MS_PER_HOUR) as u64;
+
+        // Consume the whole elapsed interval and carry the fractional part.
+        // This guarantees that a repeated read at `now_ms` cannot grant the
+        // same interval twice, even with very high regeneration rates.
+        pool.updated_at_ms = now_ms;
+
         if gained == 0 {
-            // Keep the fractional progress accumulated in `updated_at_ms`.
+            pool.regen_remainder = remainder;
             return pool.amount;
         }
 
@@ -352,14 +373,10 @@ impl Wallet {
             Some(cap) => unbounded.min(cap),
             None => unbounded,
         };
-
         if reached_cap {
-            // No need to track overflow past the cap.
-            pool.updated_at_ms = now_ms;
+            pool.regen_remainder = 0;
         } else {
-            let consumed =
-                (gained as u128 * MS_PER_HOUR / def.regen_per_hour as u128).min(elapsed_ms) as i64;
-            pool.updated_at_ms = pool.updated_at_ms.saturating_add(consumed);
+            pool.regen_remainder = remainder;
         }
         pool.amount
     }
@@ -416,6 +433,37 @@ mod tests {
         assert_eq!(wallet.resource_balance(&def, 1_000 + 60 * 60_000), 1);
         // 2 hours later: 2 more units.
         assert_eq!(wallet.resource_balance(&def, 1_000 + 3 * 3_600_000), 3);
+    }
+
+    #[test]
+    fn repeated_reads_do_not_duplicate_regeneration() {
+        let mut wallet = Wallet::new();
+        let def = ResourceDef::new("plasma", "Plasma")
+            .with_cap(1_000_000)
+            .with_regen_per_hour(10_000_000);
+        wallet.set_resource(&def, 0, 0);
+
+        // Two units are produced in the first millisecond. Reading the same
+        // timestamp repeatedly must not produce them again.
+        assert_eq!(wallet.resource_balance(&def, 1), 2);
+        assert_eq!(wallet.resource_balance(&def, 1), 2);
+        assert_eq!(wallet.resource_balance(&def, 1), 2);
+        // Advancing one millisecond grants only that millisecond's value.
+        assert_eq!(wallet.resource_balance(&def, 2), 5);
+    }
+
+    #[test]
+    fn fractional_regeneration_accumulates_across_reads() {
+        let mut wallet = Wallet::new();
+        let def = ResourceDef::new("trickle", "Trickle")
+            .with_cap(1_000)
+            .with_regen_per_hour(10);
+        wallet.set_resource(&def, 0, 0);
+        // 1000 reads, one second apart: 1000s * 10/hour = 2.77 units.
+        for second in 1..=1_000 {
+            wallet.resource_balance(&def, second * 1_000);
+        }
+        assert_eq!(wallet.resource_balance(&def, 1_000_000), 2);
     }
 
     #[test]

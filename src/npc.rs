@@ -8,14 +8,15 @@
 //! [`NpcRuntime`] orchestrates a turn:
 //! 1. builds a [`NpcContext`] (persona, channel, nearby players, recent chat),
 //! 2. awaits the agent,
-//! 3. applies structured [`NpcAction`]s through the game service,
-//! 4. posts the NPC reply to chat.
+//! 3. validates every structured [`NpcAction`] and message,
+//! 4. atomically commits actions (rewards, scores) and chat messages through
+//!    [`crate::Game::apply_npc_turn`]. A failed action leaves no side effects.
 //!
 //! Agent decisions can be deserialized directly from JSON via
 //! [`NpcDecision`], which is convenient for tool-calling / structured-output
 //! LLM integrations.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -365,9 +366,11 @@ impl NpcRuntime {
 
     /// Run a full conversational turn.
     ///
-    /// Player and NPC messages are only posted after the agent responds; an
-    /// agent error leaves the chat untouched. Actions are validated against
-    /// the set of players in the context (speaker + nearby players).
+    /// Player and NPC messages are only posted after the agent responds. The
+    /// whole turn — actions and messages — is validated and committed
+    /// atomically by [`crate::Game::apply_npc_turn`], so an invalid action
+    /// leaves no rewards, scores or chat messages behind. Action targets are
+    /// restricted to the context (speaker + nearby players).
     pub async fn converse(
         &self,
         game: &Game,
@@ -384,13 +387,6 @@ impl NpcRuntime {
         let context = game.npc_context(npc_id, account, message)?;
         let decision = agent.respond(&context).await?;
 
-        let allowed: BTreeSet<AccountId> = context
-            .nearby_players
-            .iter()
-            .map(|p| p.account.clone())
-            .chain(std::iter::once(context.speaker.clone()))
-            .collect();
-
         for action in &decision.actions {
             match action {
                 NpcAction::Say { text } => {
@@ -399,7 +395,7 @@ impl NpcRuntime {
                     }
                 }
                 NpcAction::GiveReward { account, .. } | NpcAction::SetScore { account, .. } => {
-                    if !allowed.contains(account) {
+                    if !context.allowed_account(account) {
                         return Err(NpcError::agent(format!(
                             "agent tried to act on non-nearby account {account}"
                         )));
@@ -409,44 +405,28 @@ impl NpcRuntime {
         }
 
         let NpcDecision { reply, actions } = decision;
-        let mut applied_actions = 0usize;
-        let mut say_texts = Vec::new();
-        for action in actions {
-            match action {
-                NpcAction::GiveReward { account, reward } => {
-                    game.grant_reward(&account, &reward)?;
-                    applied_actions += 1;
-                }
-                NpcAction::SetScore {
-                    leaderboard,
-                    account,
-                    score,
-                } => {
-                    game.set_leaderboard_score(&leaderboard, &account, score)?;
-                    applied_actions += 1;
-                }
-                NpcAction::Say { text } => say_texts.push(text),
-            }
-        }
-
-        let channel = context.channel.clone();
-        let player_message = game.send_message(account, channel.clone(), message)?;
-
-        let mut npc_messages = Vec::new();
-        for text in say_texts {
-            npc_messages.push(game.send_npc_message(npc_id, channel.clone(), &text)?);
-        }
+        let mut npc_texts: Vec<String> = actions
+            .iter()
+            .filter_map(|action| match action {
+                NpcAction::Say { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
         if let Some(reply) = reply {
             if !reply.trim().is_empty() {
-                npc_messages.push(game.send_npc_message(npc_id, channel.clone(), &reply)?);
+                npc_texts.push(reply);
             }
         }
 
-        Ok(NpcTurn {
-            channel,
-            player_message,
-            npc_messages,
-            applied_actions,
-        })
+        // Game applies the complete turn under one lock. A failing action
+        // therefore leaves no rewards, scores or chat messages behind.
+        Ok(game.apply_npc_turn(
+            npc_id,
+            account,
+            context.channel,
+            message,
+            &actions,
+            &npc_texts,
+        )?)
     }
 }
