@@ -27,6 +27,7 @@
 //! | Collection albums | [`collection`] |
 //! | Leaderboards & seasons | [`leaderboard`] |
 //! | Achievements | [`achievement`] |
+//! | Tasks / quests | [`task`] |
 //! | Announcements | [`announcement`] |
 //! | NPC agents (sync or LLM-backed) | [`npc`] |
 //! | Snapshot persistence | [`store`] |
@@ -48,6 +49,17 @@
 //! // Create a room and chat in it.
 //! let room = game.create_room(&account.id, "Hangout", &"asia".into(), 8, Default::default()).unwrap();
 //! game.send_message(&account.id, ChatChannel::Room(room.id), "hello").unwrap();
+//!
+//! // Accept a task, advance it through gameplay events, then claim the reward.
+//! game.register_task(
+//!     TaskDef::new("first_steps", "First Steps")
+//!         .with_objective(TaskObjective::metric("kills", 3))
+//!         .with_reward(Reward::new().currency("gold", 50)),
+//! ).unwrap();
+//! game.accept_task(&account.id, &"first_steps".into()).unwrap();
+//! let outcome = game.record_event(&account.id, "kills", 3).unwrap();
+//! assert_eq!(outcome.tasks.len(), 1);
+//! game.claim_task(&account.id, &"first_steps".into()).unwrap();
 //! ```
 //!
 //! ## Design notes
@@ -80,14 +92,15 @@ pub mod reward;
 pub mod room;
 pub mod shop;
 pub mod store;
+pub mod task;
 pub mod trade;
 pub mod wallet;
 
 pub use error::{GameError, Result};
-pub use game::{Game, GameConfig, GameState};
+pub use game::{Game, GameConfig, GameState, MetricOutcome};
 pub use ids::{
     AccountId, AchievementId, AnnouncementId, CollectionId, CurrencyId, ItemId, LeaderboardId,
-    MessageId, NpcId, OfferId, RegionId, ResourceId, RoomId, ShopId, SkinId, TradeId,
+    MessageId, NpcId, OfferId, RegionId, ResourceId, RoomId, ShopId, SkinId, TaskId, TradeId,
 };
 pub use reward::{Cost, CurrencyGrant, ItemGrant, ResourceGrant, Reward};
 
@@ -102,7 +115,7 @@ pub mod prelude {
     pub use crate::cosmetics::{Avatar, SkinCategory, SkinDef};
     pub use crate::error::{GameError, Result};
     pub use crate::friend::FriendRequest;
-    pub use crate::game::{Game, GameConfig, GameState};
+    pub use crate::game::{Game, GameConfig, GameState, MetricOutcome};
     pub use crate::ids::*;
     pub use crate::item::{Inventory, ItemDef, Rarity};
     pub use crate::leaderboard::{Leaderboard, ScoreEntry, ScoreOrder};
@@ -114,6 +127,9 @@ pub mod prelude {
     pub use crate::room::Room;
     pub use crate::shop::{PurchaseReceipt, Shop, ShopOffer};
     pub use crate::store::{GameStore, MemoryStore};
+    pub use crate::task::{
+        TaskDef, TaskObjective, TaskObjectiveView, TaskRepeat, TaskStatus, TaskView,
+    };
     pub use crate::trade::{Trade, TradeSide, TradeState};
     pub use crate::wallet::{ResourceDef, WalletSnapshot};
 }

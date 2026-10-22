@@ -109,3 +109,6 @@ define_id!(/// Identifier of an NPC.
 define_id!(/// Identifier of a chat message.
     MessageId,
     "msg");
+define_id!(/// Identifier of a task / quest.
+    TaskId,
+    "task");

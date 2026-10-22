@@ -133,8 +133,21 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         1,
         Reward::new().currency("gold", 25),
     ))?;
-    game.record_metric(&alice.id, "trades", 1)?;
+    // One gameplay event advances both achievements and accepted tasks.
+    game.register_task(
+        TaskDef::new("first_steps", "First Steps")
+            .with_category("tutorial")
+            .with_objective(TaskObjective::metric("trades", 1))
+            .with_reward(Reward::new().currency("gold", 20)),
+    )?;
+    game.accept_task(&alice.id, &"first_steps".into())?;
+    let outcome = game.record_event(&alice.id, "trades", 1)?;
+    println!(
+        "event completed achievements={:?} tasks={:?}",
+        outcome.achievements, outcome.tasks
+    );
     game.claim_achievement(&alice.id, &"first_trade".into())?;
+    game.claim_task(&alice.id, &"first_steps".into())?;
 
     game.register_collection(
         CollectionDef::new("starter", "Starter album")
