@@ -68,7 +68,9 @@
 //! * **One lock for cross-module atomicity.** Purchases, trades and claims
 //!   either fully succeed or leave state untouched.
 //! * **Serializable state.** [`Game::snapshot`] returns a plain [`GameState`]
-//!   tree; restore it with [`Game::from_state`].
+//!   tree carrying [`GAME_STATE_VERSION`]; restore it with [`Game::from_state`].
+//! * **Guard-free reads.** Prefer [`Game::with_state`] over holding a
+//!   [`Game::read_state`] guard while calling write-locking methods.
 //! * **Pluggable clock.** Use [`clock::ManualClock`] for deterministic tests.
 //! * **NPC agents are async and external.** Register them on [`npc::NpcRuntime`];
 //!   they are not part of the serialized state.
@@ -97,7 +99,7 @@ pub mod trade;
 pub mod wallet;
 
 pub use error::{GameError, GameResult, Result};
-pub use game::{Game, GameConfig, GameState, MetricOutcome};
+pub use game::{Game, GameConfig, GameState, MetricOutcome, GAME_STATE_VERSION};
 pub use ids::{
     AccountId, AchievementId, AnnouncementId, CollectionId, CurrencyId, ItemId, LeaderboardId,
     MessageId, NpcId, OfferId, RegionId, ResourceId, RoomId, ShopId, SkinId, TaskId, TradeId,
@@ -109,7 +111,7 @@ pub mod prelude {
     pub use crate::account::Account;
     pub use crate::achievement::{AchievementDef, AchievementView};
     pub use crate::announcement::{Announcement, AnnouncementDraft, AnnouncementKind};
-    pub use crate::chat::{ChatAuthor, ChatChannel, ChatMessage};
+    pub use crate::chat::{ChannelSummary, ChatAuthor, ChatChannel, ChatMessage};
     pub use crate::clock::{Clock, ManualClock, SystemClock};
     pub use crate::collection::{Collectible, CollectionDef, CollectionMilestone};
     pub use crate::cosmetics::{Avatar, SkinCategory, SkinDef};
@@ -117,7 +119,7 @@ pub mod prelude {
     // `std::result::Result` inside trait implementations.
     pub use crate::error::{GameError, GameResult};
     pub use crate::friend::FriendRequest;
-    pub use crate::game::{Game, GameConfig, GameState, MetricOutcome};
+    pub use crate::game::{Game, GameConfig, GameState, MetricOutcome, GAME_STATE_VERSION};
     pub use crate::ids::*;
     pub use crate::item::{Inventory, ItemDef, Rarity};
     pub use crate::leaderboard::{Leaderboard, ScoreEntry, ScoreOrder};

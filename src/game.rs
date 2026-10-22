@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::account::{validate_display_name, Account};
 use crate::achievement::{AchievementBook, AchievementDef, AchievementView};
 use crate::announcement::{Announcement, AnnouncementBoard, AnnouncementDraft};
-use crate::chat::{ChatAuthor, ChatChannel, ChatMessage, ChatService};
+use crate::chat::{ChannelSummary, ChatAuthor, ChatChannel, ChatMessage, ChatService};
 use crate::clock::{Clock, SystemClock};
 use crate::collection::{
     Collectible, CollectionBook, CollectionDef, CollectionProgress, MilestoneProgress,
@@ -81,12 +81,26 @@ impl Default for GameConfig {
     }
 }
 
+/// Current schema version written into every [`GameState`] snapshot.
+pub const GAME_STATE_VERSION: u32 = 1;
+
+fn default_schema_version() -> u32 {
+    GAME_STATE_VERSION
+}
+
 /// Full serializable game state.
 ///
 /// This is the unit of persistence. It is deliberately a plain data tree so
 /// hosts can persist it as JSON, MessagePack, a database snapshot, etc.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+///
+/// `version` identifies the schema. Snapshots written before the field existed
+/// deserialize to the current version; when changing persisted structures,
+/// bump [`GAME_STATE_VERSION`] and migrate snapshots before calling
+/// [`Game::from_state`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GameState {
+    #[serde(default = "default_schema_version")]
+    pub version: u32,
     pub accounts: BTreeMap<AccountId, Account>,
     pub regions: RegionRegistry,
     pub rooms: RoomRegistry,
@@ -106,6 +120,33 @@ pub struct GameState {
     pub tasks: TaskBook,
     pub announcements: AnnouncementBoard,
     pub npcs: NpcRegistry,
+}
+
+impl Default for GameState {
+    fn default() -> Self {
+        Self {
+            version: GAME_STATE_VERSION,
+            accounts: BTreeMap::new(),
+            regions: RegionRegistry::default(),
+            rooms: RoomRegistry::default(),
+            friends: FriendGraph::default(),
+            chat: ChatService::default(),
+            items: ItemCatalog::default(),
+            resources: ResourceCatalog::default(),
+            wallets: BTreeMap::new(),
+            inventories: BTreeMap::new(),
+            shops: ShopBook::default(),
+            trades: TradeBook::default(),
+            skins: SkinCatalog::default(),
+            cosmetics: Cosmetics::default(),
+            collections: CollectionBook::default(),
+            leaderboards: BTreeMap::new(),
+            achievements: AchievementBook::default(),
+            tasks: TaskBook::default(),
+            announcements: AnnouncementBoard::default(),
+            npcs: NpcRegistry::default(),
+        }
+    }
 }
 
 /// Result of feeding one gameplay event.
@@ -168,12 +209,24 @@ impl Game {
     }
 
     /// Restore a game from a previous snapshot.
-    pub fn from_state(state: GameState, config: GameConfig, clock: Arc<dyn Clock>) -> Self {
+    ///
+    /// A missing/zero schema version is normalized to
+    /// [`GAME_STATE_VERSION`]. Hosts must migrate snapshots with a different
+    /// version before calling this constructor.
+    pub fn from_state(mut state: GameState, config: GameConfig, clock: Arc<dyn Clock>) -> Self {
+        if state.version == 0 {
+            state.version = GAME_STATE_VERSION;
+        }
         Self {
             state: RwLock::new(state),
             config,
             clock,
         }
+    }
+
+    /// Schema version of the currently loaded state.
+    pub fn state_version(&self) -> u32 {
+        self.state.read().version
     }
 
     pub fn config(&self) -> &GameConfig {
@@ -190,8 +243,21 @@ impl Game {
     }
 
     /// Read-only access to raw state for integrations that need custom queries.
+    ///
+    /// **Deadlock warning:** parking_lot locks are not reentrant. Do not hold
+    /// this guard while calling a `Game` method that takes a write lock
+    /// (`wallet`, `task_views`, `purchase`, `record_event`, ...). Prefer
+    /// [`Game::with_state`] so the guard cannot escape the query scope.
     pub fn read_state(&self) -> RwLockReadGuard<'_, GameState> {
         self.state.read()
+    }
+
+    /// Run a short read-only query under the read lock.
+    ///
+    /// The closure still must not call write-locking `Game` methods; it is a
+    /// safer alternative to storing a [`Game::read_state`] guard.
+    pub fn with_state<R>(&self, query: impl FnOnce(&GameState) -> R) -> R {
+        query(&self.state.read())
     }
 
     // =====================================================================
@@ -704,13 +770,32 @@ impl Game {
     }
 
     /// Equip an owned skin, replacing whatever was equipped in its category.
+    /// Equip an owned skin.
+    ///
+    /// Frame and badge skins are mirrored into [`Avatar`] so the avatar and
+    /// equipped-skin state never diverge.
     pub fn equip_skin(&self, account: &AccountId, skin: &SkinId) -> Result<Option<SkinId>> {
         let mut state = self.state.write();
         ensure_account_exists(&state, account)?;
         let category = state.skins.require(skin)?.category.clone();
-        state.cosmetics.equip(account, skin.clone(), category)
+        let previous = state
+            .cosmetics
+            .equip(account, skin.clone(), category.clone())?;
+        let avatar = &mut state
+            .accounts
+            .get_mut(account)
+            .expect("account checked")
+            .avatar;
+        match category {
+            SkinCategory::Frame => avatar.frame = Some(skin.clone()),
+            SkinCategory::Badge => avatar.badge = Some(skin.clone()),
+            _ => {}
+        }
+        Ok(previous)
     }
 
+    /// Unequip a skin category. Frame/badge selections are cleared from the
+    /// avatar as well.
     pub fn unequip_skin(
         &self,
         account: &AccountId,
@@ -718,11 +803,25 @@ impl Game {
     ) -> Result<Option<SkinId>> {
         let mut state = self.state.write();
         ensure_account_exists(&state, account)?;
-        Ok(state.cosmetics.unequip(account, category))
+        let removed = state.cosmetics.unequip(account, category);
+        let avatar = &mut state
+            .accounts
+            .get_mut(account)
+            .expect("account checked")
+            .avatar;
+        match category {
+            SkinCategory::Frame => avatar.frame = None,
+            SkinCategory::Badge => avatar.badge = None,
+            _ => {}
+        }
+        Ok(removed)
     }
 
     /// Update avatar, validating that frame / badge skins are owned and of the
     /// correct category.
+    ///
+    /// The supplied avatar is authoritative: frame/badge values are mirrored
+    /// into the account's equipped skins, and `None` unequips that category.
     pub fn update_avatar(&self, account: &AccountId, mut avatar: Avatar) -> Result<Avatar> {
         avatar.image = avatar
             .image
@@ -756,6 +855,27 @@ impl Game {
         ensure_account_exists(&state, account)?;
         validate_skin_slot(&state, account, avatar.frame.as_ref(), &SkinCategory::Frame)?;
         validate_skin_slot(&state, account, avatar.badge.as_ref(), &SkinCategory::Badge)?;
+
+        match &avatar.frame {
+            Some(frame) => {
+                state
+                    .cosmetics
+                    .equip(account, frame.clone(), SkinCategory::Frame)?;
+            }
+            None => {
+                state.cosmetics.unequip(account, &SkinCategory::Frame);
+            }
+        }
+        match &avatar.badge {
+            Some(badge) => {
+                state
+                    .cosmetics
+                    .equip(account, badge.clone(), SkinCategory::Badge)?;
+            }
+            None => {
+                state.cosmetics.unequip(account, &SkinCategory::Badge);
+            }
+        }
         state
             .accounts
             .get_mut(account)
@@ -778,6 +898,7 @@ impl Game {
         let mut state = self.state.write();
         ensure_account_exists(&state, from)?;
         ensure_account_exists(&state, to)?;
+        check_region_open_for_activity(&state, from)?;
         let message = message
             .map(str::trim)
             .filter(|message| !message.is_empty())
@@ -797,6 +918,7 @@ impl Game {
     pub fn accept_friend_request(&self, receiver: &AccountId, sender: &AccountId) -> Result<()> {
         let mut state = self.state.write();
         ensure_account_exists(&state, receiver)?;
+        check_region_open_for_activity(&state, receiver)?;
         state.friends.accept_request(receiver, sender)
     }
 
@@ -1038,6 +1160,7 @@ impl Game {
         let channel = normalize_channel(channel);
         let now = self.now_ms();
         let mut state = self.state.write();
+        check_region_open_for_activity(&state, account)?;
         check_channel_access(&state, account, &channel)?;
         state.chat.post(
             channel,
@@ -1114,6 +1237,46 @@ impl Game {
         self.state.read().chat.recent(channel, limit)
     }
 
+    /// Channels with retained history that the account may currently read,
+    /// newest activity first.
+    ///
+    /// Global, the account's region, rooms the account belongs to, and
+    /// unblocked private conversations are included. Channels are created
+    /// lazily by the first message.
+    pub fn channels_for(&self, account: &AccountId) -> Result<Vec<ChannelSummary>> {
+        let state = self.state.read();
+        let account_info = state
+            .accounts
+            .get(account)
+            .ok_or_else(|| GameError::AccountNotFound(account.clone()))?;
+        let mut summaries: Vec<ChannelSummary> = state
+            .chat
+            .summaries()
+            .into_iter()
+            .filter(|summary| match &summary.channel {
+                ChatChannel::Global => true,
+                ChatChannel::Region(region) => *region == account_info.region,
+                ChatChannel::Room(room) => state
+                    .rooms
+                    .get(room)
+                    .is_some_and(|room| room.contains(account)),
+                ChatChannel::Private { a, b } => {
+                    if account != a && account != b {
+                        return false;
+                    }
+                    let other = if account == a { b } else { a };
+                    state.accounts.contains_key(other) && !state.friends.blocked_either(a, b)
+                }
+            })
+            .collect();
+        summaries.sort_by(|a, b| {
+            b.last_message_at_ms
+                .cmp(&a.last_message_at_ms)
+                .then_with(|| a.channel.cmp(&b.channel))
+        });
+        Ok(summaries)
+    }
+
     pub fn delete_message(&self, channel: &ChatChannel, message: &MessageId) -> Result<()> {
         let mut state = self.state.write();
         if state.chat.delete(channel, message) {
@@ -1184,6 +1347,7 @@ impl Game {
             .get(account)
             .ok_or_else(|| GameError::AccountNotFound(account.clone()))?
             .clone();
+        check_region_open_for_activity(&state, account)?;
         let offer = {
             let shop = state
                 .shops
@@ -1255,6 +1419,8 @@ impl Game {
         let mut state = self.state.write();
         ensure_account_exists(&state, initiator)?;
         ensure_account_exists(&state, partner)?;
+        check_region_open_for_activity(&state, initiator)?;
+        check_region_open_for_activity(&state, partner)?;
         let expiry_ms = self
             .config
             .trade_expiry_secs
@@ -1294,6 +1460,7 @@ impl Game {
         let now = self.now_ms();
         let mut state = self.state.write();
         ensure_account_exists(&state, account)?;
+        check_region_open_for_activity(&state, account)?;
         let snapshot = state
             .trades
             .get(trade_id)
@@ -1349,6 +1516,7 @@ impl Game {
         let now = self.now_ms();
         let mut state = self.state.write();
         ensure_account_exists(&state, account)?;
+        check_region_open_for_activity(&state, account)?;
         let snapshot = state
             .trades
             .get(trade_id)
@@ -1651,6 +1819,7 @@ impl Game {
         let now = self.now_ms();
         let mut state = self.state.write();
         ensure_account_exists(&state, account)?;
+        check_region_open_for_activity(&state, account)?;
         let def = state.tasks.require(id)?.clone();
         if !task_unlocked_for(&state, account, &def, now) {
             return Err(GameError::TaskLocked(id.clone()));
@@ -2104,6 +2273,7 @@ impl Game {
         let now = self.now_ms();
         let mut state = self.state.write();
         ensure_account_exists(&state, speaker)?;
+        check_region_open_for_activity(&state, speaker)?;
         let npc = state.npcs.require(npc_id)?.clone();
         if !npc.enabled {
             return Err(GameError::NpcDisabled(npc_id.clone()));
@@ -2264,6 +2434,22 @@ fn ensure_account_exists(state: &GameState, account: &AccountId) -> Result<()> {
     } else {
         Err(GameError::AccountNotFound(account.clone()))
     }
+}
+
+/// Reject new player activity for accounts whose region is `Closed`.
+///
+/// `Maintenance` keeps existing players active. Read-only queries, reward
+/// claims and profile edits are deliberately not gated by this check.
+fn check_region_open_for_activity(state: &GameState, account: &AccountId) -> Result<()> {
+    let account_info = state
+        .accounts
+        .get(account)
+        .ok_or_else(|| GameError::AccountNotFound(account.clone()))?;
+    let region = state.regions.require(&account_info.region)?;
+    if region.status == RegionStatus::Closed {
+        return Err(GameError::RegionNotOpen(account_info.region.clone()));
+    }
+    Ok(())
 }
 
 /// Activities performed by accounts already assigned to a region.
@@ -2650,8 +2836,14 @@ fn task_view_in_state(
     now_ms: i64,
 ) -> TaskView {
     let progress = state.tasks.progress(account, &def.id);
+    // Once the cooldown is over, the task presents a new cycle: counter
+    // progress and all cycle timestamps from the claimed run must not leak into
+    // the view. Item/skin/achievement objectives remain live by design.
+    let fresh_cycle = progress.is_some_and(|progress| task_cycle_fresh(def, progress, now_ms));
+    let cycle = if fresh_cycle { None } else { progress };
+
     let empty_counters = BTreeMap::new();
-    let counters = progress
+    let counters = cycle
         .map(|progress| &progress.counters)
         .unwrap_or(&empty_counters);
     let objectives = def
@@ -2677,14 +2869,25 @@ fn task_view_in_state(
         status: task_status_in_state(state, account, def, now_ms),
         objectives,
         reward: def.reward.clone(),
-        accepted_at_ms: progress.map(|progress| progress.accepted_at_ms),
-        expires_at_ms: progress.and_then(|progress| progress.expires_at_ms),
-        completed_at_ms: progress.and_then(|progress| progress.completed_at_ms),
-        claimed_at_ms: progress.and_then(|progress| progress.claimed_at_ms),
-        next_available_at_ms: progress.and_then(|progress| progress.next_available_at(def.repeat)),
+        accepted_at_ms: cycle.map(|progress| progress.accepted_at_ms),
+        expires_at_ms: cycle.and_then(|progress| progress.expires_at_ms),
+        completed_at_ms: cycle.and_then(|progress| progress.completed_at_ms),
+        claimed_at_ms: cycle.and_then(|progress| progress.claimed_at_ms),
+        next_available_at_ms: cycle.and_then(|progress| progress.next_available_at(def.repeat)),
         repeat: def.repeat,
         min_level: def.min_level,
+        requires: def.requires.clone(),
+        regions: def.regions.clone(),
+        starts_at_ms: def.starts_at_ms,
+        ends_at_ms: def.ends_at_ms,
         hidden: def.hidden,
+    }
+}
+
+fn task_cycle_fresh(def: &TaskDef, progress: &TaskProgress, now_ms: i64) -> bool {
+    match (progress.claimed_at_ms, def.repeat.cooldown_ms()) {
+        (Some(claimed_at), Some(duration)) => now_ms >= claimed_at.saturating_add(duration),
+        _ => false,
     }
 }
 
@@ -2705,8 +2908,12 @@ fn task_status_in_state(
     if let Some(claimed_at) = progress.claimed_at_ms {
         if let TaskRepeat::Cooldown { duration_ms } = def.repeat {
             let available_at = claimed_at.saturating_add(duration_ms);
-            if now_ms >= available_at && task_unlocked_for(state, account, def, now_ms) {
-                return TaskStatus::Available;
+            if now_ms >= available_at {
+                return if task_unlocked_for(state, account, def, now_ms) {
+                    TaskStatus::Available
+                } else {
+                    TaskStatus::Locked
+                };
             }
         }
         return TaskStatus::Claimed;

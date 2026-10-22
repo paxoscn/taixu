@@ -132,6 +132,14 @@ impl ChatAuthor {
     }
 }
 
+/// Lightweight summary of a channel that has retained messages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelSummary {
+    pub channel: ChatChannel,
+    pub last_message_at_ms: Option<i64>,
+    pub message_count: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: MessageId,
@@ -270,5 +278,17 @@ impl ChatService {
 
     pub fn channels(&self) -> impl Iterator<Item = &ChatChannel> {
         self.logs.keys()
+    }
+
+    /// Summaries of every channel that currently has a stored log.
+    pub fn summaries(&self) -> Vec<ChannelSummary> {
+        self.logs
+            .iter()
+            .map(|(channel, log)| ChannelSummary {
+                channel: channel.clone(),
+                last_message_at_ms: log.messages.back().map(|message| message.sent_at_ms),
+                message_count: log.messages.len(),
+            })
+            .collect()
     }
 }

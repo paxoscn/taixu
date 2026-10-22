@@ -332,6 +332,13 @@ pub struct TaskView {
     pub next_available_at_ms: Option<i64>,
     pub repeat: TaskRepeat,
     pub min_level: Option<u32>,
+    /// Prerequisite tasks, so clients can explain a `Locked` status.
+    pub requires: Vec<TaskId>,
+    /// Region restriction. `None` means available in all regions.
+    pub regions: Option<BTreeSet<RegionId>>,
+    /// Availability window, so clients can explain a `Locked` status.
+    pub starts_at_ms: Option<i64>,
+    pub ends_at_ms: Option<i64>,
     pub hidden: bool,
 }
 

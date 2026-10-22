@@ -17,9 +17,15 @@ use crate::ids::{AccountId, RegionId};
 pub enum RegionStatus {
     #[default]
     Open,
-    /// Existing players may stay, but nobody new can enter.
+    /// Existing players stay active, but no new accounts can be assigned and
+    /// no accounts can move into the region.
     Maintenance,
-    /// Region is closed to all new activity.
+    /// New entry is blocked, and existing players cannot start new player
+    /// activity: rooms, chat, purchases, trades, friend requests and task
+    /// acceptance are rejected with [`crate::GameError::RegionNotOpen`].
+    ///
+    /// Read-only queries, reward claims, abandoning trades/tasks, and profile
+    /// or cosmetic edits remain available.
     Closed,
 }
 
