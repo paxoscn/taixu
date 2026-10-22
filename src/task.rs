@@ -318,19 +318,33 @@ pub struct TaskObjectiveView {
 /// Client-facing snapshot of one task for an account.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskView {
+    /// Task definition id.
     pub id: TaskId,
+    /// Display name.
     pub name: String,
+    /// Player-facing description.
     pub description: String,
+    /// Host-defined grouping (`main`, `daily`, ...).
     pub category: String,
+    /// Current lifecycle state for this account.
     pub status: TaskStatus,
+    /// Objective progress for the current cycle.
     pub objectives: Vec<TaskObjectiveView>,
+    /// Reward granted by `claim_task`.
     pub reward: Reward,
+    /// Start of the current acceptance cycle; `None` for a fresh/unaccepted view.
     pub accepted_at_ms: Option<i64>,
+    /// Deadline of the current cycle.
     pub expires_at_ms: Option<i64>,
+    /// Time the current cycle was completed.
     pub completed_at_ms: Option<i64>,
+    /// Time the current cycle's reward was claimed.
     pub claimed_at_ms: Option<i64>,
+    /// For a claimed repeatable task, when the next cycle becomes available.
     pub next_available_at_ms: Option<i64>,
+    /// Repeat policy.
     pub repeat: TaskRepeat,
+    /// Minimum account level.
     pub min_level: Option<u32>,
     /// Prerequisite tasks, so clients can explain a `Locked` status.
     pub requires: Vec<TaskId>,
@@ -338,7 +352,9 @@ pub struct TaskView {
     pub regions: Option<BTreeSet<RegionId>>,
     /// Availability window, so clients can explain a `Locked` status.
     pub starts_at_ms: Option<i64>,
+    /// Availability window end (exclusive).
     pub ends_at_ms: Option<i64>,
+    /// Hidden tasks are omitted from lists until the account has progress.
     pub hidden: bool,
 }
 

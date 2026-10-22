@@ -135,18 +135,27 @@ impl ChatAuthor {
 /// Lightweight summary of a channel that has retained messages.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelSummary {
+    /// Channel identity (global / region / room / private).
     pub channel: ChatChannel,
+    /// Timestamp of the newest retained message, if any.
     pub last_message_at_ms: Option<i64>,
+    /// Number of retained messages in the channel.
     pub message_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
+    /// Server-generated message id.
     pub id: MessageId,
+    /// Channel the message belongs to.
     pub channel: ChatChannel,
+    /// Account, NPC or system author.
     pub author: ChatAuthor,
+    /// Trimmed message body.
     pub body: String,
+    /// Send time (Unix ms).
     pub sent_at_ms: i64,
+    /// Host-defined metadata (client correlation ids, moderation flags, ...).
     pub metadata: BTreeMap<String, String>,
 }
 

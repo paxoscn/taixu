@@ -12,14 +12,23 @@ use crate::ids::{AccountId, RegionId, RoomId};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Room {
+    /// Server-generated room id.
     pub id: RoomId,
+    /// Display name.
     pub name: String,
+    /// Region the room belongs to.
     pub region: RegionId,
+    /// Current owner; transferred when the owner leaves.
     pub owner: AccountId,
+    /// Maximum players.
     pub capacity: usize,
+    /// Current members.
     pub players: BTreeSet<AccountId>,
+    /// Free-form room settings (topic, mode, host-defined flags).
     pub metadata: BTreeMap<String, String>,
+    /// Creation time (Unix ms).
     pub created_at_ms: i64,
+    /// Last membership/metadata change (Unix ms).
     pub updated_at_ms: i64,
 }
 

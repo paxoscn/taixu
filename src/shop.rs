@@ -13,22 +13,30 @@ use crate::reward::{Cost, Reward};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShopOffer {
+    /// Unique within its shop.
     pub id: OfferId,
+    /// Display name.
     pub name: String,
+    /// Player-facing description.
     pub description: String,
+    /// Payment bundle, scaled by purchase quantity.
     pub cost: Cost,
+    /// Delivery bundle, scaled by purchase quantity (skins grant at most once).
     pub reward: Reward,
+    /// Start of the offer window (inclusive); `None` means always open.
     pub starts_at_ms: Option<i64>,
+    /// End of the offer window (exclusive); `None` means never closes.
     pub ends_at_ms: Option<i64>,
     /// Restrict this offer to accounts in these regions. `None` means all.
     pub regions: Option<BTreeSet<RegionId>>,
     /// Maximum units one account may buy over the offer's whole lifetime.
     pub per_account_limit: Option<u64>,
-    /// Remaining stock across all accounts. `None` means unlimited.
+    /// Total stock across all accounts. `None` means unlimited.
     pub stock: Option<u64>,
-    /// Units already sold. Maintained by the backend.
+    /// Units already sold. Maintained by the backend; do not edit directly.
     #[serde(default)]
     pub sold: u64,
+    /// Free-form tags for client filtering (`featured`, `event`, ...).
     pub tags: BTreeSet<String>,
 }
 

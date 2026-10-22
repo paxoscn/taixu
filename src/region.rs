@@ -31,15 +31,21 @@ pub enum RegionStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Region {
+    /// Stable region / shard id.
     pub id: RegionId,
+    /// Display name.
     pub name: String,
     /// Connect endpoint advertised to clients (`wss://...`, host:port, ...).
     pub endpoint: Option<String>,
     /// Maximum number of assigned accounts. `None` is unbounded.
     pub capacity: Option<usize>,
+    /// Availability and activity gate; see [`RegionStatus`].
     pub status: RegionStatus,
+    /// Accounts currently assigned to this region (not just online accounts).
     pub players: BTreeSet<AccountId>,
+    /// Free-form shard metadata (build, datacenter, feature flags, ...).
     pub metadata: BTreeMap<String, String>,
+    /// Region creation time (Unix ms).
     pub created_at_ms: i64,
 }
 

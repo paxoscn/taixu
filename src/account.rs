@@ -14,14 +14,23 @@ use crate::ids::{AccountId, RegionId};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
+    /// Externally authenticated, stable account id.
     pub id: AccountId,
+    /// Player-facing name (1..=GameConfig::max_name_len characters).
     pub display_name: String,
+    /// Assigned region / server node.
     pub region: RegionId,
+    /// Host-defined level; the library does not auto-level from XP.
     pub level: u32,
+    /// Cumulative experience; rewards add to this value.
     pub xp: u64,
+    /// Account creation time (Unix ms).
     pub created_at_ms: i64,
+    /// Last login/heartbeat/logout time (Unix ms). Used by hosts for presence GC.
     pub last_seen_ms: i64,
+    /// Set by `login`/`heartbeat`, cleared by `logout`; never auto-expired.
     pub online: bool,
+    /// Avatar image/title/frame/badge. Frame and badge mirror equipped skins.
     pub avatar: Avatar,
     /// Free-form profile data owned by the host game.
     pub metadata: BTreeMap<String, String>,

@@ -57,14 +57,19 @@ impl ItemGrant {
 /// Everything a player can receive at once.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reward {
+    /// Currency grants, aggregated with overflow checks.
     #[serde(default)]
     pub currencies: Vec<CurrencyGrant>,
+    /// Resource grants; each is clamped at its resource cap.
     #[serde(default)]
     pub resources: Vec<ResourceGrant>,
+    /// Inventory grants; all must fit or the reward fails atomically.
     #[serde(default)]
     pub items: Vec<ItemGrant>,
+    /// Unique cosmetic unlocks; already-owned skins are idempotent.
     #[serde(default)]
     pub skins: Vec<SkinId>,
+    /// Experience added to the account.
     #[serde(default)]
     pub xp: u64,
 }
@@ -167,8 +172,10 @@ impl Reward {
 /// Everything a player can pay at once.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cost {
+    /// Currency costs; duplicates are aggregated.
     #[serde(default)]
     pub currencies: Vec<CurrencyGrant>,
+    /// Resource costs; evaluated after lazy regeneration.
     #[serde(default)]
     pub resources: Vec<ResourceGrant>,
 }

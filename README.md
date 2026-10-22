@@ -32,6 +32,21 @@ taixu = "0.1"
 | 公告 `announcement` | 时间窗、区域定向、优先级、已读/未读 |
 | NPC Agent `npc` | 异步 Agent 接口、上下文/提示词、结构化动作、规则型实现 |
 
+## 文档
+
+- [API 参考索引](docs/api.md)（完整签名请运行 `cargo doc --no-deps --open`）
+- [JSON / serde 线格式契约](docs/json-contracts.md)
+- [状态机与时间语义](docs/state-machines.md)
+- [持久化与迁移](docs/persistence.md)
+- [宿主集成指南](docs/hosting.md)
+- [NPC Agent 契约](docs/npc.md)
+- [GameConfig 参考](docs/config.md)
+- [错误与原子性矩阵](docs/errors.md)
+- [Cookbook](docs/cookbook.md)
+- [CHANGELOG](CHANGELOG.md)
+
+README 中的 Rust 代码块会作为 doctest 编译验证。
+
 ## 快速开始
 
 ```rust
@@ -131,7 +146,17 @@ fn main() -> taixu::Result<()> {
 }
 ```
 
-更多完整示例见 [`examples/basic.rs`](examples/basic.rs)：`cargo run --example basic`。
+更多可运行示例：
+
+```bash
+cargo run --example basic            # 全模块入门
+cargo run --example tasks            # 四类目标与重复任务
+cargo run --example trade_rollback   # 交易结算失败回滚
+cargo run --example npc_actions      # 自定义 Agent 与原子动作
+cargo run --example persistence      # 版本快照与 GameStore
+cargo run --example region_matrix    # Maintenance / Closed
+cargo run --example channels         # 账号频道列表
+```
 
 ## 设计
 
@@ -160,18 +185,25 @@ fn main() -> taixu::Result<()> {
 `GameState` 实现了 `serde::{Serialize, Deserialize}`，推荐方式：
 
 ```rust
-let json = serde_json::to_string(&game.snapshot())?;
+use taixu::prelude::*;
+
+fn dump_snapshot(game: &Game) -> taixu::Result<String> {
+    serde_json::to_string(&game.snapshot())
+        .map_err(|error| GameError::Persistence(error.to_string()))
+}
 ```
 
 也可以通过 `GameStore` 接入数据库/对象存储：
 
 ```rust
-use taixu::store::{GameStore, MemoryStore};
+use taixu::prelude::*;
+use taixu::store::MemoryStore;
 
-let store = MemoryStore::new();
-game.save_to(&store)?;
-let restored = taixu::Game::load_from(&store, game.config().clone())?
-    .expect("snapshot exists");
+fn save_and_reload(game: &Game) -> taixu::Result<Option<Game>> {
+    let store = MemoryStore::new();
+    game.save_to(&store)?;
+    Game::load_from(&store, game.config().clone())
+}
 ```
 
 快照包含 `version` 字段（当前为 `GAME_STATE_VERSION`）。结构变更时宿主应先按版本迁移，再调用 `Game::from_state`；缺失版本的旧快照会按当前版本读取。
@@ -198,6 +230,8 @@ clock.advance(60_000); // 推进一分钟
 `GameConfig` 控制背包默认容量、房间上限、聊天长度/保留条数、交易有效期、NPC 上下文条数等：
 
 ```rust
+use taixu::prelude::*;
+
 let game = Game::with_config(GameConfig {
     default_inventory_capacity: 80,
     trade_expiry_secs: 3_600,
@@ -215,25 +249,30 @@ let game = Game::with_config(GameConfig {
 - `TaskObjective::achievement("first_blood")`：检查成就完成。
 
 ```rust
-game.register_task(
-    TaskDef::new("daily_bounty", "Daily bounty")
-        .with_category("daily")
-        .with_objective(TaskObjective::metric("bounty", 3))
-        .with_objective(TaskObjective::item("trophy", 1))
-        .with_reward(Reward::new().currency("gold", 200))
-        .with_min_level(5)
-        .with_repeat(TaskRepeat::daily())
-        .with_time_limit_ms(6 * 3_600_000),
-)?;
+use taixu::prelude::*;
 
-game.accept_task(&alice.id, &"daily_bounty".into())?;
+fn daily_bounty(game: &Game, alice: &Account) -> taixu::Result<()> {
+    game.register_task(
+        TaskDef::new("daily_bounty", "Daily bounty")
+            .with_category("daily")
+            .with_objective(TaskObjective::metric("bounty", 3))
+            .with_objective(TaskObjective::item("trophy", 1))
+            .with_reward(Reward::new().currency("gold", 200))
+            .with_min_level(5)
+            .with_repeat(TaskRepeat::daily())
+            .with_time_limit_ms(6 * 3_600_000),
+    )?;
 
-// 同一事件同时推进成就与所有进行中的任务。
-let outcome = game.record_event(&alice.id, "bounty", 1)?;
-println!("achievements={:?} tasks={:?}", outcome.achievements, outcome.tasks);
+    game.accept_task(&alice.id, &"daily_bounty".into())?;
 
-// 目标满足后可随时领奖（道具/皮肤/成就目标会在查询或领奖时重新计算）。
-game.claim_task(&alice.id, &"daily_bounty".into())?;
+    // 同一事件同时推进成就与所有进行中的任务。
+    let outcome = game.record_event(&alice.id, "bounty", 1)?;
+    println!("achievements={:?} tasks={:?}", outcome.achievements, outcome.tasks);
+
+    // 目标满足后可随时领奖（道具/皮肤/成就目标会在查询或领奖时重新计算）。
+    game.claim_task(&alice.id, &"daily_bounty".into())?;
+    Ok(())
+}
 ```
 
 - `available_tasks` / `active_tasks` / `completed_tasks` / `task_views` 提供不同视图；`TaskView` 暴露 `requires`、`regions`、`starts_at_ms`、`ends_at_ms`，客户端可解释 `Locked` 原因；
@@ -266,21 +305,24 @@ impl NpcAgent for MyLlmAgent {
     }
 }
 
-let game = Game::new();
-game.create_region("asia", "Asia", None, None)?;
-let account = game.create_account("alice", "Alice", "asia")?;
-game.register_npc(
-    NpcDef::new("guide", "Guide", "A friendly town guide.")
-        .in_region("asia"),
-)?;
+fn demo() -> taixu::Result<()> {
+    let game = Game::new();
+    game.create_region("asia", "Asia", None, None)?;
+    let account = game.create_account("alice", "Alice", "asia")?;
+    game.register_npc(
+        NpcDef::new("guide", "Guide", "A friendly town guide.")
+            .in_region("asia"),
+    )?;
 
-let mut runtime = NpcRuntime::new();
-runtime.register("guide", Arc::new(MyLlmAgent { /* ... */ }));
+    let mut runtime = NpcRuntime::new();
+    runtime.register("guide", Arc::new(MyLlmAgent { /* ... */ }));
 
-// 异步执行一轮对话（宿主自行选择 tokio / async-std 等运行时）：
-// let turn = runtime
-//     .converse(&game, &"guide".into(), &account.id, "Where is the shop?")
-//     .await?;
+    // 异步执行一轮对话（宿主自行选择 tokio / async-std 等运行时）：
+    // let turn = runtime
+    //     .converse(&game, &"guide".into(), &account.id, "Where is the shop?")
+    //     .await?;
+    Ok(())
+}
 ```
 
 Agent 可以返回结构化动作，由运行时校验并原子执行：
@@ -295,7 +337,10 @@ Agent 可以返回结构化动作，由运行时校验并原子执行：
 
 ## 目录
 
-```
+```text
+docs/                文档手册（API/JSON/状态机/持久化/宿主/NPC/错误）
+examples/            可运行示例（基础、任务、交易回滚、NPC、持久化、区域）
+tests/               端到端、回归与 JSON 契约测试
 src/
   game.rs            集中式 Game 门面、原子经济操作、GameState
   account.rs         账号档案
@@ -316,7 +361,7 @@ src/
   npc.rs             NPC Agent 运行时
   store.rs           快照持久化接口
 tests/backend.rs     端到端测试
-examples/basic.rs    可运行示例
+examples/            可运行示例（basic/tasks/trade_rollback/npc_actions/persistence/region_matrix/channels）
 ```
 
 ## 测试
