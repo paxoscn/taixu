@@ -226,6 +226,11 @@ impl Cosmetics {
 ///
 /// `frame` and `badge` must reference owned skins of the matching category;
 /// [`crate::Game::update_avatar`] enforces this.
+///
+/// The avatar is authoritative for these two slots: [`crate::Game::update_avatar`]
+/// mirrors them into [`OwnedSkins::equipped`] (and `None` unequips), while
+/// [`crate::Game::equip_skin`] / [`crate::Game::unequip_skin`] update the
+/// avatar in return.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Avatar {
     /// Opaque host-defined image / preset identifier (e.g. a URL or asset id).

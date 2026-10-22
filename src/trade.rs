@@ -180,12 +180,20 @@ impl TradeBook {
             .ok_or_else(|| GameError::TradeNotFound(id.clone()))
     }
 
+    /// Trades involving an account, newest first.
     pub fn for_account(&self, account: &AccountId) -> Vec<Trade> {
-        self.trades
+        let mut trades: Vec<Trade> = self
+            .trades
             .values()
             .filter(|trade| trade.is_participant(account))
             .cloned()
-            .collect()
+            .collect();
+        trades.sort_by(|a, b| {
+            b.created_at_ms
+                .cmp(&a.created_at_ms)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        trades
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Trade> {

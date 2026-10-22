@@ -14,21 +14,21 @@ taixu = "0.1"
 | 模块 | 能力 |
 | --- | --- |
 | 账号 `account` | 游戏侧档案、等级/经验、在线状态、元数据；**鉴权由外部提供** |
-| 区域 `region` | 服务器节点注册、容量、`Open/Maintenance/Closed` 状态、账号归属与迁移 |
+| 区域 `region` | 服务器节点注册、容量、`Open/Maintenance/Closed` 状态矩阵、账号归属与迁移 |
 | 房间 `room` | 创建/加入/离开/关闭、容量、房主转移、踢人、元数据 |
 | 交友 `friend` | 好友申请（接受/拒绝/取消）、关系、拉黑（双向阻断消息与申请） |
-| 聊天 `chat` | 全局/区域/房间/私聊频道、有界历史、消息删除、系统与 NPC 消息 |
+| 聊天 `chat` | 全局/区域/房间/私聊频道、有界历史、消息删除、系统与 NPC 消息、账号频道列表 |
 | 道具 `item` | 道具定义、稀有度、堆叠上限、唯一道具、槽位背包 |
 | 背包 `inventory` | 固定槽位、自动叠堆、批量增删的**全有或全无**语义、容量调整 |
 | 金钱与资源 `wallet` | 多货币；带上限与按小时被动恢复的资源（惰性结算） |
 | 商店 `shop` | 多商店/商品、货币+资源定价、库存、限购、时间窗、区域限制 |
 | 交易 `trade` | 双方挂单、确认成交、到期、原子结算与失败回滚 |
-| 头像 `Avatar` | 图片/头衔/头像框/徽章，校验皮肤归属与分类 |
+| 头像 `Avatar` | 图片/头衔/头像框/徽章，校验皮肤归属与分类，并与已装备皮肤双向同步 |
 | 皮肤 `cosmetics` | 皮肤目录、拥有关系、按分类装备 |
 | 收集 `collection` | 图鉴条目（道具/皮肤/成就）、里程碑与一次性领奖 |
 | 排名 `leaderboard` | 高/低分榜、并列名次、Top-N、赛季重置 |
 | 成就 `achievement` | 指标计数、自动解锁、一次性领奖、隐藏成就 |
-| 任务 `task` | 接取/放弃/领奖、指标/道具/皮肤/成就目标、前置、等级/区域/时间窗、限时、每日/每周/冷却重复 |
+| 任务 `task` | 接取/放弃/领奖、指标/道具/皮肤/成就目标、前置、等级/区域/时间窗、限时、每日/每周/冷却重复、新周期视图与锁定原因 |
 | 公告 `announcement` | 时间窗、区域定向、优先级、已读/未读 |
 | NPC Agent `npc` | 异步 Agent 接口、上下文/提示词、结构化动作、规则型实现 |
 
@@ -146,7 +146,14 @@ fn main() -> taixu::Result<()> {
 - 商店购买：校验 → 扣费 → 发货 → 更新库存/限购；任一步失败则全部不落盘。
 - 交易成交：双方移出挂单资产 → 互相放入 → 双方同时提交；背包不足或资产已消失时交易保持未完成并重置确认。
 - 成就/收集领奖：先发货成功，再标记已领取。
+- NPC 回合：动作（发奖/排行榜）与玩家/NPC 聊天消息在同一写锁内提交；任一动作失败不产生任何副作用。
 - 跨区域迁移：校验目标区域容量 → 切换归属 → 自动退出房间。
+
+### 区域状态
+
+- `Maintenance`：已有账号可继续使用房间、聊天、经济与任务；禁止新账号归属和跨区迁入。
+- `Closed`：在 `Maintenance` 基础上，进一步拒绝新房间、玩家聊天、购买、交易、好友申请和接任务。
+- 只读查询、领奖、放弃交易/任务、资料与外观编辑仍可用。
 
 ### 持久化
 
@@ -166,6 +173,10 @@ game.save_to(&store)?;
 let restored = taixu::Game::load_from(&store, game.config().clone())?
     .expect("snapshot exists");
 ```
+
+快照包含 `version` 字段（当前为 `GAME_STATE_VERSION`）。结构变更时宿主应先按版本迁移，再调用 `Game::from_state`；缺失版本的旧快照会按当前版本读取。
+
+`Game::read_state()` 返回读锁 guard，而 parking_lot 锁不可重入：持有 guard 时不能调用 `wallet`、`task_views`、`purchase` 等写锁方法。短查询请使用 `Game::with_state(|state| ...)`。
 
 实现 `GameStore` 即可替换为 Postgres / Redis / S3 等。建议在网关层周期性做全量快照，或按业务事件做增量持久化。
 
@@ -225,10 +236,10 @@ println!("achievements={:?} tasks={:?}", outcome.achievements, outcome.tasks);
 game.claim_task(&alice.id, &"daily_bounty".into())?;
 ```
 
-- `available_tasks` / `active_tasks` / `completed_tasks` / `task_views` 提供不同视图；
+- `available_tasks` / `active_tasks` / `completed_tasks` / `task_views` 提供不同视图；`TaskView` 暴露 `requires`、`regions`、`starts_at_ms`、`ends_at_ms`，客户端可解释 `Locked` 原因；
 - 任务可设置前置任务、最低等级、区域与开放时间窗；
 - 限时任务过期后状态为 `Expired`，可重新接取；若在期限内完成，过期后仍可领奖；
-- `TaskRepeat::daily()` / `weekly()` / `cooldown(ms)` 在领奖后开始冷却，接取新一轮会重置计数；
+- `TaskRepeat::daily()` / `weekly()` / `cooldown(ms)` 在领奖后开始冷却；冷却结束后视图进入新周期（指标与时间戳清零），若当前条件不满足则状态为 `Locked`；接取新一轮会重置计数；
 - `abandon_task` 放弃进行中的任务，`record_event` 返回本次完成的成就与任务 ID。
 
 ## NPC Agent
