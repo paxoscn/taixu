@@ -28,6 +28,7 @@ taixu = "0.1"
 | 收集 `collection` | 图鉴条目（道具/皮肤/成就）、里程碑与一次性领奖 |
 | 排名 `leaderboard` | 高/低分榜、并列名次、Top-N、赛季重置 |
 | 成就 `achievement` | 指标计数、自动解锁、一次性领奖、隐藏成就 |
+| 任务 `task` | 接取/放弃/领奖、指标/道具/皮肤/成就目标、前置、等级/区域/时间窗、限时、每日/每周/冷却重复 |
 | 公告 `announcement` | 时间窗、区域定向、优先级、已读/未读 |
 | NPC Agent `npc` | 异步 Agent 接口、上下文/提示词、结构化动作、规则型实现 |
 
@@ -100,6 +101,17 @@ fn main() -> Result<()> {
     ))?;
     game.record_metric(&alice.id, "kills", 1)?;
     game.claim_achievement(&alice.id, &"first_blood".into())?;
+
+    // 任务：接取 → 通过游戏事件推进 → 领奖。
+    game.register_task(
+        TaskDef::new("first_steps", "First Steps")
+            .with_objective(TaskObjective::metric("kills", 3))
+            .with_reward(Reward::new().currency("gold", 50)),
+    )?;
+    game.accept_task(&alice.id, &"first_steps".into())?;
+    let outcome = game.record_event(&alice.id, "kills", 3)?;
+    assert_eq!(outcome.tasks.len(), 1);
+    game.claim_task(&alice.id, &"first_steps".into())?;
 
     // 公告。
     game.publish_announcement(
@@ -182,6 +194,43 @@ let game = Game::with_config(GameConfig {
 });
 ```
 
+## 任务系统
+
+任务支持四种目标，并可自由组合：
+
+- `TaskObjective::metric("kills", 3)`：由游戏事件计数推进；
+- `TaskObjective::item("potion", 3)`：检查实时背包数量；
+- `TaskObjective::skin("gold_frame")`：检查皮肤拥有；
+- `TaskObjective::achievement("first_blood")`：检查成就完成。
+
+```rust
+game.register_task(
+    TaskDef::new("daily_bounty", "Daily bounty")
+        .with_category("daily")
+        .with_objective(TaskObjective::metric("bounty", 3))
+        .with_objective(TaskObjective::item("trophy", 1))
+        .with_reward(Reward::new().currency("gold", 200))
+        .with_min_level(5)
+        .with_repeat(TaskRepeat::daily())
+        .with_time_limit_ms(6 * 3_600_000),
+)?;
+
+game.accept_task(&alice.id, &"daily_bounty".into())?;
+
+// 同一事件同时推进成就与所有进行中的任务。
+let outcome = game.record_event(&alice.id, "bounty", 1)?;
+println!("achievements={:?} tasks={:?}", outcome.achievements, outcome.tasks);
+
+// 目标满足后可随时领奖（道具/皮肤/成就目标会在查询或领奖时重新计算）。
+game.claim_task(&alice.id, &"daily_bounty".into())?;
+```
+
+- `available_tasks` / `active_tasks` / `completed_tasks` / `task_views` 提供不同视图；
+- 任务可设置前置任务、最低等级、区域与开放时间窗；
+- 限时任务过期后状态为 `Expired`，可重新接取；若在期限内完成，过期后仍可领奖；
+- `TaskRepeat::daily()` / `weekly()` / `cooldown(ms)` 在领奖后开始冷却，接取新一轮会重置计数；
+- `abandon_task` 放弃进行中的任务，`record_event` 返回本次完成的成就与任务 ID。
+
 ## NPC Agent
 
 NPC 定义保存在 `GameState` 中；Agent 运行时（可能持有 LLM 客户端）独立于可序列化状态。
@@ -251,6 +300,7 @@ src/
   collection.rs      图鉴收集
   leaderboard.rs     排行榜
   achievement.rs     成就
+  task.rs            任务/任务进度
   announcement.rs    公告
   npc.rs             NPC Agent 运行时
   store.rs           快照持久化接口

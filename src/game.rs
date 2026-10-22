@@ -29,7 +29,7 @@ use crate::error::{GameError, Result};
 use crate::friend::{FriendGraph, FriendRequest};
 use crate::ids::{
     AccountId, AchievementId, AnnouncementId, CollectionId, CurrencyId, ItemId, LeaderboardId,
-    MessageId, NpcId, OfferId, RegionId, ResourceId, RoomId, ShopId, SkinId, TradeId,
+    MessageId, NpcId, OfferId, RegionId, ResourceId, RoomId, ShopId, SkinId, TaskId, TradeId,
 };
 use crate::item::{Inventory, ItemCatalog, ItemDef};
 use crate::leaderboard::{Leaderboard, ScoreEntry};
@@ -38,6 +38,10 @@ use crate::region::{Region, RegionRegistry, RegionStatus};
 use crate::reward::{Cost, CurrencyGrant, Reward};
 use crate::room::{Room, RoomRegistry};
 use crate::shop::{PurchaseReceipt, Shop, ShopBook, ShopOffer};
+use crate::task::{
+    TaskBook, TaskDef, TaskObjective, TaskObjectiveView, TaskProgress, TaskRepeat, TaskStatus,
+    TaskView,
+};
 use crate::trade::{Trade, TradeBook, TradeSide, TradeState};
 use crate::wallet::{ResourceCatalog, ResourceDef, Wallet, WalletSnapshot};
 
@@ -99,8 +103,18 @@ pub struct GameState {
     pub collections: CollectionBook,
     pub leaderboards: BTreeMap<LeaderboardId, Leaderboard>,
     pub achievements: AchievementBook,
+    pub tasks: TaskBook,
     pub announcements: AnnouncementBoard,
     pub npcs: NpcRegistry,
+}
+
+/// Result of feeding one gameplay event.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricOutcome {
+    /// Achievements completed by this event.
+    pub achievements: Vec<AchievementId>,
+    /// Tasks completed by this event.
+    pub tasks: Vec<TaskId>,
 }
 
 /// Thread-safe facade over the whole backend.
@@ -1479,16 +1493,39 @@ impl Game {
         self.state.read().achievements.iter().cloned().collect()
     }
 
-    /// Feed a named counter. Returns achievements newly completed by this call.
+    /// Feed one named gameplay event to **both** achievements and active tasks.
+    ///
+    /// Returns what was completed. Item / skin / achievement objectives are
+    /// re-evaluated as part of this call, so a task may complete here even if
+    /// its objectives are not metric-based.
+    pub fn record_event(
+        &self,
+        account: &AccountId,
+        metric: &str,
+        amount: u64,
+    ) -> Result<MetricOutcome> {
+        let now = self.now_ms();
+        let mut state = self.state.write();
+        ensure_account_exists(&state, account)?;
+        let achievements = state.achievements.record_metric(account, metric, amount);
+        let tasks = record_task_metric_in_state(&mut state, account, metric, amount, now);
+        Ok(MetricOutcome {
+            achievements,
+            tasks,
+        })
+    }
+
+    /// Feed a named counter and return the achievements newly completed.
+    ///
+    /// Task progress is advanced as well; use [`Game::record_event`] when the
+    /// caller also needs the ids of tasks completed by the event.
     pub fn record_metric(
         &self,
         account: &AccountId,
         metric: &str,
         amount: u64,
     ) -> Result<Vec<AchievementId>> {
-        let mut state = self.state.write();
-        ensure_account_exists(&state, account)?;
-        Ok(state.achievements.record_metric(account, metric, amount))
+        Ok(self.record_event(account, metric, amount)?.achievements)
     }
 
     pub fn achievement_view(
@@ -1532,6 +1569,161 @@ impl Game {
         let mut assets = load_assets(&state, &self.config, account)?;
         apply_reward(&state, &mut assets, &def.reward, now)?;
         state.achievements.mark_claimed(account, achievement);
+        save_assets(&mut state, account, assets);
+        Ok(def.reward)
+    }
+
+    // =====================================================================
+    // Tasks
+    // =====================================================================
+
+    pub fn register_task(&self, def: TaskDef) -> Result<()> {
+        self.state.write().tasks.register(def)
+    }
+
+    pub fn task_definition(&self, id: &TaskId) -> Result<TaskDef> {
+        self.state
+            .read()
+            .tasks
+            .get(id)
+            .cloned()
+            .ok_or_else(|| GameError::TaskNotFound(id.clone()))
+    }
+
+    pub fn task_definitions(&self) -> Vec<TaskDef> {
+        self.state.read().tasks.iter().cloned().collect()
+    }
+
+    /// Current state of every visible task for an account.
+    ///
+    /// Hidden tasks appear only once the account has progress on them.
+    pub fn task_views(&self, account: &AccountId) -> Result<Vec<TaskView>> {
+        let now = self.now_ms();
+        let mut state = self.state.write();
+        ensure_account_exists(&state, account)?;
+        refresh_account_tasks(&mut state, account, now);
+        Ok(task_views_in_state(&state, account, now))
+    }
+
+    pub fn task_view(&self, account: &AccountId, id: &TaskId) -> Result<TaskView> {
+        let now = self.now_ms();
+        let mut state = self.state.write();
+        ensure_account_exists(&state, account)?;
+        let def = state.tasks.require(id)?.clone();
+        refresh_account_tasks(&mut state, account, now);
+        Ok(task_view_in_state(&state, account, &def, now))
+    }
+
+    /// Tasks whose requirements are met and that are not accepted yet.
+    pub fn available_tasks(&self, account: &AccountId) -> Result<Vec<TaskView>> {
+        Ok(self
+            .task_views(account)?
+            .into_iter()
+            .filter(|view| view.status == TaskStatus::Available)
+            .collect())
+    }
+
+    pub fn active_tasks(&self, account: &AccountId) -> Result<Vec<TaskView>> {
+        Ok(self
+            .task_views(account)?
+            .into_iter()
+            .filter(|view| view.status == TaskStatus::Active)
+            .collect())
+    }
+
+    /// Completed tasks whose reward has not been claimed yet.
+    pub fn completed_tasks(&self, account: &AccountId) -> Result<Vec<TaskView>> {
+        Ok(self
+            .task_views(account)?
+            .into_iter()
+            .filter(|view| view.status == TaskStatus::Completed)
+            .collect())
+    }
+
+    /// Accept a task. Accepting an expired or repeatable-ready task resets its
+    /// counters and starts a new cycle.
+    pub fn accept_task(&self, account: &AccountId, id: &TaskId) -> Result<TaskView> {
+        let now = self.now_ms();
+        let mut state = self.state.write();
+        ensure_account_exists(&state, account)?;
+        let def = state.tasks.require(id)?.clone();
+        if !task_unlocked_for(&state, account, &def, now) {
+            return Err(GameError::TaskLocked(id.clone()));
+        }
+
+        if let Some(existing) = state.tasks.progress(account, id).cloned() {
+            if let Some(claimed_at) = existing.claimed_at_ms {
+                match def.repeat {
+                    TaskRepeat::Once => return Err(GameError::TaskAlreadyClaimed(id.clone())),
+                    TaskRepeat::Cooldown { duration_ms } => {
+                        let available_at_ms = claimed_at.saturating_add(duration_ms);
+                        if now < available_at_ms {
+                            return Err(GameError::TaskOnCooldown {
+                                task: id.clone(),
+                                available_at_ms,
+                            });
+                        }
+                    }
+                }
+            } else if existing.completed_at_ms.is_some() {
+                return Err(GameError::TaskAlreadyCompleted(id.clone()));
+            } else if !existing.is_expired(now) {
+                return Err(GameError::TaskAlreadyAccepted(id.clone()));
+            }
+        }
+
+        let expires_at_ms = def.time_limit_ms.map(|limit| now.saturating_add(limit));
+        state
+            .tasks
+            .set_progress(account, id.clone(), TaskProgress::new(now, expires_at_ms));
+        refresh_account_tasks(&mut state, account, now);
+        Ok(task_view_in_state(&state, account, &def, now))
+    }
+
+    /// Give up an accepted (possibly completed) task. Claimed tasks cannot be
+    /// abandoned. The task becomes available again if requirements still hold.
+    pub fn abandon_task(&self, account: &AccountId, id: &TaskId) -> Result<()> {
+        let mut state = self.state.write();
+        ensure_account_exists(&state, account)?;
+        state.tasks.require(id)?;
+        let progress = state
+            .tasks
+            .progress(account, id)
+            .cloned()
+            .ok_or_else(|| GameError::TaskNotAccepted(id.clone()))?;
+        if progress.claimed_at_ms.is_some() {
+            return Err(GameError::TaskAlreadyClaimed(id.clone()));
+        }
+        state.tasks.remove_progress(account, id);
+        Ok(())
+    }
+
+    /// Claim a completed task's reward atomically.
+    pub fn claim_task(&self, account: &AccountId, id: &TaskId) -> Result<Reward> {
+        let now = self.now_ms();
+        let mut state = self.state.write();
+        ensure_account_exists(&state, account)?;
+        let def = state.tasks.require(id)?.clone();
+        // Items / skins / achievements may have satisfied objectives since the
+        // task was last inspected.
+        refresh_account_tasks(&mut state, account, now);
+        let progress = state
+            .tasks
+            .progress(account, id)
+            .cloned()
+            .ok_or_else(|| GameError::TaskNotAccepted(id.clone()))?;
+        if progress.claimed_at_ms.is_some() {
+            return Err(GameError::TaskAlreadyClaimed(id.clone()));
+        }
+        if progress.completed_at_ms.is_none() {
+            return Err(GameError::TaskNotCompleted(id.clone()));
+        }
+
+        let mut assets = load_assets(&state, &self.config, account)?;
+        apply_reward(&state, &mut assets, &def.reward, now)?;
+        if let Some(progress) = state.tasks.progress_mut(account, id) {
+            progress.claimed_at_ms = Some(now);
+        }
         save_assets(&mut state, account, assets);
         Ok(def.reward)
     }
@@ -2192,4 +2384,217 @@ fn achievement_view_in_state(
         claimed: state.achievements.is_claimed(account, &def.id),
         hidden: def.hidden,
     }
+}
+
+// =========================================================================
+// Task helpers
+// =========================================================================
+
+fn task_views_in_state(state: &GameState, account: &AccountId, now_ms: i64) -> Vec<TaskView> {
+    let mut views: Vec<TaskView> = state
+        .tasks
+        .iter()
+        .filter(|def| !def.hidden || state.tasks.progress(account, &def.id).is_some())
+        .map(|def| task_view_in_state(state, account, def, now_ms))
+        .collect();
+    views.sort_by(|a, b| a.category.cmp(&b.category).then_with(|| a.id.cmp(&b.id)));
+    views
+}
+
+fn task_view_in_state(
+    state: &GameState,
+    account: &AccountId,
+    def: &TaskDef,
+    now_ms: i64,
+) -> TaskView {
+    let progress = state.tasks.progress(account, &def.id);
+    let empty_counters = BTreeMap::new();
+    let counters = progress
+        .map(|progress| &progress.counters)
+        .unwrap_or(&empty_counters);
+    let objectives = def
+        .objectives
+        .iter()
+        .map(|objective| {
+            let (progress, target, complete) =
+                task_objective_progress(state, account, counters, objective);
+            TaskObjectiveView {
+                objective: objective.clone(),
+                progress,
+                target,
+                complete,
+            }
+        })
+        .collect();
+
+    TaskView {
+        id: def.id.clone(),
+        name: def.name.clone(),
+        description: def.description.clone(),
+        category: def.category.clone(),
+        status: task_status_in_state(state, account, def, now_ms),
+        objectives,
+        reward: def.reward.clone(),
+        accepted_at_ms: progress.map(|progress| progress.accepted_at_ms),
+        expires_at_ms: progress.and_then(|progress| progress.expires_at_ms),
+        completed_at_ms: progress.and_then(|progress| progress.completed_at_ms),
+        claimed_at_ms: progress.and_then(|progress| progress.claimed_at_ms),
+        next_available_at_ms: progress.and_then(|progress| progress.next_available_at(def.repeat)),
+        repeat: def.repeat,
+        min_level: def.min_level,
+        hidden: def.hidden,
+    }
+}
+
+fn task_status_in_state(
+    state: &GameState,
+    account: &AccountId,
+    def: &TaskDef,
+    now_ms: i64,
+) -> TaskStatus {
+    let Some(progress) = state.tasks.progress(account, &def.id) else {
+        return if task_unlocked_for(state, account, def, now_ms) {
+            TaskStatus::Available
+        } else {
+            TaskStatus::Locked
+        };
+    };
+
+    if let Some(claimed_at) = progress.claimed_at_ms {
+        if let TaskRepeat::Cooldown { duration_ms } = def.repeat {
+            let available_at = claimed_at.saturating_add(duration_ms);
+            if now_ms >= available_at && task_unlocked_for(state, account, def, now_ms) {
+                return TaskStatus::Available;
+            }
+        }
+        return TaskStatus::Claimed;
+    }
+    if progress.completed_at_ms.is_some() {
+        return TaskStatus::Completed;
+    }
+    if progress.is_expired(now_ms) {
+        return TaskStatus::Expired;
+    }
+    TaskStatus::Active
+}
+
+fn task_unlocked_for(state: &GameState, account: &AccountId, def: &TaskDef, now_ms: i64) -> bool {
+    let Some(account_info) = state.accounts.get(account) else {
+        return false;
+    };
+    if def
+        .min_level
+        .is_some_and(|min_level| account_info.level < min_level)
+    {
+        return false;
+    }
+    if let Some(regions) = &def.regions {
+        if !regions.contains(&account_info.region) {
+            return false;
+        }
+    }
+    if def.starts_at_ms.is_some_and(|start| now_ms < start) {
+        return false;
+    }
+    if def.ends_at_ms.is_some_and(|end| now_ms >= end) {
+        return false;
+    }
+    def.requires
+        .iter()
+        .all(|prerequisite| state.tasks.is_completed(account, prerequisite))
+}
+
+fn task_objective_progress(
+    state: &GameState,
+    account: &AccountId,
+    counters: &BTreeMap<String, u64>,
+    objective: &TaskObjective,
+) -> (u64, u64, bool) {
+    let target = objective.target();
+    let raw = match objective {
+        TaskObjective::Metric { metric, .. } => counters.get(metric).copied().unwrap_or(0),
+        TaskObjective::Item { item, .. } => state
+            .inventories
+            .get(account)
+            .map(|inventory| inventory.count(item))
+            .unwrap_or(0),
+        TaskObjective::Skin { skin } => u64::from(state.cosmetics.owns(account, skin)),
+        TaskObjective::Achievement { achievement } => {
+            u64::from(state.achievements.is_completed(account, achievement))
+        }
+    };
+    let progress = raw.min(target);
+    (progress, target, progress >= target)
+}
+
+fn task_objectives_complete(
+    state: &GameState,
+    account: &AccountId,
+    def: &TaskDef,
+    counters: &BTreeMap<String, u64>,
+) -> bool {
+    def.objectives
+        .iter()
+        .all(|objective| task_objective_progress(state, account, counters, objective).2)
+}
+
+/// Mark active tasks whose objectives are now satisfied as completed. Returns
+/// the tasks newly marked by this call.
+fn refresh_account_tasks(state: &mut GameState, account: &AccountId, now_ms: i64) -> Vec<TaskId> {
+    let mut newly_completed = Vec::new();
+    for (id, progress) in state.tasks.account_progress(account) {
+        if progress.completed_at_ms.is_some()
+            || progress.claimed_at_ms.is_some()
+            || progress.is_expired(now_ms)
+        {
+            continue;
+        }
+        let complete = state
+            .tasks
+            .get(&id)
+            .is_some_and(|def| task_objectives_complete(state, account, def, &progress.counters));
+        if complete {
+            newly_completed.push(id);
+        }
+    }
+    for id in &newly_completed {
+        if let Some(progress) = state.tasks.progress_mut(account, id) {
+            progress.completed_at_ms = Some(now_ms);
+        }
+    }
+    newly_completed
+}
+
+/// Advance metric objectives on all active tasks, then refresh completion from
+/// live item / skin / achievement state.
+fn record_task_metric_in_state(
+    state: &mut GameState,
+    account: &AccountId,
+    metric: &str,
+    amount: u64,
+    now_ms: i64,
+) -> Vec<TaskId> {
+    if amount == 0 {
+        return Vec::new();
+    }
+    for (id, mut progress) in state.tasks.account_progress(account) {
+        if progress.completed_at_ms.is_some()
+            || progress.claimed_at_ms.is_some()
+            || progress.is_expired(now_ms)
+        {
+            continue;
+        }
+        let relevant = state.tasks.get(&id).is_some_and(|def| {
+            def.objectives
+                .iter()
+                .any(|objective| objective.metric_key() == Some(metric))
+        });
+        if !relevant {
+            continue;
+        }
+        let counter = progress.counters.entry(metric.to_owned()).or_insert(0);
+        *counter = counter.saturating_add(amount);
+        state.tasks.set_progress(account, id, progress);
+    }
+    refresh_account_tasks(state, account, now_ms)
 }

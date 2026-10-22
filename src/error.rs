@@ -4,7 +4,7 @@ use crate::chat::ChatChannel;
 use crate::cosmetics::SkinCategory;
 use crate::ids::{
     AccountId, AchievementId, AnnouncementId, CollectionId, CurrencyId, ItemId, LeaderboardId,
-    MessageId, NpcId, OfferId, RegionId, ResourceId, RoomId, ShopId, SkinId, TradeId,
+    MessageId, NpcId, OfferId, RegionId, ResourceId, RoomId, ShopId, SkinId, TaskId, TradeId,
 };
 use thiserror::Error;
 
@@ -175,6 +175,26 @@ pub enum GameError {
     AchievementNotCompleted,
     #[error("achievement reward already claimed")]
     AchievementAlreadyClaimed,
+
+    // ---- tasks --------------------------------------------------------------
+    #[error("task not found: {0}")]
+    TaskNotFound(TaskId),
+    #[error("task already exists: {0}")]
+    TaskAlreadyExists(TaskId),
+    #[error("task requirements are not met: {0}")]
+    TaskLocked(TaskId),
+    #[error("task is already accepted: {0}")]
+    TaskAlreadyAccepted(TaskId),
+    #[error("task is already completed and awaiting reward: {0}")]
+    TaskAlreadyCompleted(TaskId),
+    #[error("task has not been accepted: {0}")]
+    TaskNotAccepted(TaskId),
+    #[error("task objectives are not completed: {0}")]
+    TaskNotCompleted(TaskId),
+    #[error("task has already been claimed: {0}")]
+    TaskAlreadyClaimed(TaskId),
+    #[error("task is on cooldown until {available_at_ms}: {task}")]
+    TaskOnCooldown { task: TaskId, available_at_ms: i64 },
 
     // ---- announcements ------------------------------------------------------
     #[error("announcement not found: {0}")]
