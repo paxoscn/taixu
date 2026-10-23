@@ -44,6 +44,7 @@ taixu = "0.1"
 - [错误与原子性矩阵](docs/errors.md)
 - [Cookbook](docs/cookbook.md)
 - [CHANGELOG](CHANGELOG.md)
+- [taixu Agent Skill](skills/taixu/SKILL.md) — 供该库用户安装到自己的 Claude Code skills 目录
 
 README 中的 Rust 代码块会作为 doctest 编译验证。
 
