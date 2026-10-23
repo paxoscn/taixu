@@ -83,13 +83,13 @@ impl Announcement {
     pub fn is_active(&self, now_ms: i64) -> bool {
         self.enabled
             && now_ms >= self.starts_at_ms
-            && self.ends_at_ms.map_or(true, |end| now_ms < end)
+            && self.ends_at_ms.is_none_or(|end| now_ms < end)
     }
 
     pub fn targets_region(&self, region: &RegionId) -> bool {
         self.regions
             .as_ref()
-            .map_or(true, |regions| regions.contains(region))
+            .is_none_or(|regions| regions.contains(region))
     }
 }
 
