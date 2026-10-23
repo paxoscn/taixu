@@ -95,12 +95,12 @@ impl ShopOffer {
     }
 
     pub fn available_at(&self, now_ms: i64, region: &RegionId) -> bool {
-        let window = self.starts_at_ms.map_or(true, |start| now_ms >= start)
-            && self.ends_at_ms.map_or(true, |end| now_ms < end);
+        let window = self.starts_at_ms.is_none_or(|start| now_ms >= start)
+            && self.ends_at_ms.is_none_or(|end| now_ms < end);
         let region_ok = self
             .regions
             .as_ref()
-            .map_or(true, |regions| regions.contains(region));
+            .is_none_or(|regions| regions.contains(region));
         window && region_ok
     }
 
@@ -151,12 +151,12 @@ impl Shop {
     }
 
     pub fn is_open_at(&self, now_ms: i64, region: &RegionId) -> bool {
-        self.opens_at_ms.map_or(true, |open| now_ms >= open)
-            && self.closes_at_ms.map_or(true, |close| now_ms < close)
+        self.opens_at_ms.is_none_or(|open| now_ms >= open)
+            && self.closes_at_ms.is_none_or(|close| now_ms < close)
             && self
                 .regions
                 .as_ref()
-                .map_or(true, |regions| regions.contains(region))
+                .is_none_or(|regions| regions.contains(region))
     }
 
     pub fn add_offer(&mut self, offer: ShopOffer) -> Result<()> {

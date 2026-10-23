@@ -1055,7 +1055,7 @@ impl Game {
         let mut rooms: Vec<Room> = state
             .rooms
             .iter()
-            .filter(|room| region.map_or(true, |region| room.region == *region))
+            .filter(|room| region.is_none_or(|region| room.region == *region))
             .cloned()
             .collect();
         rooms.sort_by(|a, b| {
