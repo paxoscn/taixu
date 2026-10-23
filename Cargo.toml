@@ -2,10 +2,13 @@
 name = "taixu"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.89"
 description = "General-purpose, embeddable game backend building blocks"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/paxoscn/taixu"
+homepage = "https://github.com/paxoscn/taixu"
+documentation = "https://docs.rs/taixu"
 keywords = ["game", "backend", "server", "inventory", "leaderboard"]
 categories = ["game-engines"]
 
