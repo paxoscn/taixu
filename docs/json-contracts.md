@@ -7,7 +7,7 @@
 - 所有 ID 都是透明字符串 newtype（`AccountId`、`TaskId`、`ShopId`…）。
 - 客户端不应依赖结构体字段顺序。
 
-契约由 `tests/json_contracts.rs` 的 round-trip 测试守护。
+契约由库内的 round-trip 测试守护；使用方按本页构造/解析 JSON 即可。
 
 ## 频道与消息
 

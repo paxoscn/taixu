@@ -10,6 +10,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Skill references in sync
+        run: scripts/sync-skill-docs.sh --check
       - name: Format
         run: cargo fmt --check
       - name: Clippy
