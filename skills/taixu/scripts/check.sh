@@ -4,6 +4,9 @@ set -euo pipefail
 root="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$root"
 
+echo "==> bundled references are in sync with docs/"
+"$root/skills/taixu/scripts/sync-docs.sh" --check
+
 echo "==> cargo fmt --check"
 cargo fmt --check
 

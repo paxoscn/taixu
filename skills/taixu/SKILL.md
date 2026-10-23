@@ -418,7 +418,7 @@ original game instead of `SystemClock`.
 - `Option` fields serialize as `null`, not omitted.
 - Errors are not serde types; map `GameError` to protocol error codes.
 
-Full details and examples: `docs/json-contracts.md`.
+Full details and examples: `references/json-contracts.md`.
 Wire shapes are guarded by `tests/json_contracts.rs`.
 
 ## Locks, atomicity and errors
@@ -451,51 +451,56 @@ Common error families: `AccountNotFound`, `RegionNotOpen`, `RoomFull`,
 `TaskOnCooldown`, `TradeExpired`, `ChannelAccessDenied`, `Blocked`,
 `LeaderboardNotFound`, `NpcDisabled`, `Persistence`.
 
-Full matrix: `docs/errors.md`.
+Full matrix: `references/errors.md`.
 
 ## Reference map
 
-Read from the repository root:
+Bundled with this skill (copied from the taixu repository `docs/`):
 
 | Need | File |
 | --- | --- |
-| Method/API index, lock table | `docs/api.md` |
-| JSON shapes and examples | `docs/json-contracts.md` |
-| Task/trade/region/resource/NPC state machines | `docs/state-machines.md` |
-| Snapshot version/migration/GameStore | `docs/persistence.md` |
-| Host responsibilities and operations | `docs/hosting.md` |
-| NPC prompt/decision/action contract | `docs/npc.md` |
-| All `GameConfig` fields | `docs/config.md` |
-| Error variants and atomicity | `docs/errors.md` |
-| Common flows | `docs/cookbook.md` |
-| Behavior changes | `CHANGELOG.md` |
-| Runnable examples | `examples/` |
-| Acceptance tests | `tests/*.rs` |
+| Method/API index, lock table | `references/api.md` |
+| JSON shapes and examples | `references/json-contracts.md` |
+| Task/trade/region/resource/NPC state machines | `references/state-machines.md` |
+| Snapshot version/migration/GameStore | `references/persistence.md` |
+| Host responsibilities and operations | `references/hosting.md` |
+| NPC prompt/decision/action contract | `references/npc.md` |
+| All `GameConfig` fields | `references/config.md` |
+| Error variants and atomicity | `references/errors.md` |
+| Common flows | `references/cookbook.md` |
+| Behavior changes | `references/CHANGELOG.md` |
+| Runnable examples | <https://github.com/paxoscn/taixu/tree/main/examples> |
+| Acceptance tests | <https://github.com/paxoscn/taixu/tree/main/tests> |
 
-Examples: `basic`, `tasks`, `trade_rollback`, `npc_actions`, `persistence`,
-`region_matrix`, `channels`.
+Examples in the taixu repository: `basic`, `tasks`, `trade_rollback`,
+`npc_actions`, `persistence`, `region_matrix`, `channels`.
 
 ## Feature workflow
 
-When adding/fixing library behavior:
+When changing the taixu library itself:
 
-1. Read the relevant module and reference doc; identify the state machine and
-   all side effects.
+1. Read the relevant module and bundled reference; identify the state machine
+   and all side effects.
 2. Implement inside `Game` under one write lock. For multi-step mutations,
    validate first and mutate clones before committing.
 3. Keep `GameState` serde-compatible; bump `GAME_STATE_VERSION` for breaking
    snapshot changes and document migration.
 4. Add a regression test (atomicity, boundary, concurrency, or wire shape).
 5. Update JSON contract tests if a client-visible type changed.
-6. Update the relevant `docs/*.md`, `CHANGELOG.md`, and README if user-facing.
+6. Update the relevant repository `docs/*.md`, `CHANGELOG.md`, and README if
+   user-facing, then run `scripts/sync-docs.sh` to refresh bundled references.
 7. Run the full check:
 
 ```bash
-.claude/skills/taixu/scripts/check.sh
+skills/taixu/scripts/check.sh
 ```
 
-The script runs fmt, clippy, all tests, README doctests, strict rustdoc and all
-examples.
+The script checks that bundled references are in sync, then runs fmt, clippy,
+all tests, README doctests, strict rustdoc and all examples.
+
+When using taixu from a consumer application, run your own `cargo test`,
+`cargo clippy` and any integration tests; the maintainer check script lives here
+but is not required in the consumer project.
 
 ## Pitfalls checklist
 
