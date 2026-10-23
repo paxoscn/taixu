@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-skill_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-root="$(git -C "$skill_dir" rev-parse --show-toplevel)"
+root="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+skill_dir="$root/skills/taixu"
 src="$root/docs"
 dst="$skill_dir/references"
 

@@ -1,13 +1,13 @@
 # Cookbook
 
-可直接运行的完整示例：
+以下完整示例位于 taixu 仓库的 `examples/`，**可选**；下面各节的使用方式不依赖阅读上游源码。
 
-- [`examples/basic.rs`](../examples/basic.rs)：世界、经济、房间、交易、任务、NPC、快照
-- [`examples/tasks.rs`](../examples/tasks.rs)：四类目标、冷却与新周期
-- [`examples/trade_rollback.rs`](../examples/trade_rollback.rs)：结算失败回滚
-- [`examples/npc_actions.rs`](../examples/npc_actions.rs)：自定义 Agent 与原子动作
-- [`examples/persistence.rs`](../examples/persistence.rs)：版本快照、`GameStore`、恢复
-- [`examples/region_matrix.rs`](../examples/region_matrix.rs)：Maintenance / Closed 行为
+- [basic.rs](https://github.com/paxoscn/taixu/blob/main/examples/basic.rs)：世界、经济、房间、交易、任务、NPC、快照
+- [tasks.rs](https://github.com/paxoscn/taixu/blob/main/examples/tasks.rs)：四类目标、冷却与新周期
+- [trade_rollback.rs](https://github.com/paxoscn/taixu/blob/main/examples/trade_rollback.rs)：结算失败回滚
+- [npc_actions.rs](https://github.com/paxoscn/taixu/blob/main/examples/npc_actions.rs)：自定义 Agent 与原子动作
+- [persistence.rs](https://github.com/paxoscn/taixu/blob/main/examples/persistence.rs)：版本快照、`GameStore`、恢复
+- [region_matrix.rs](https://github.com/paxoscn/taixu/blob/main/examples/region_matrix.rs)：Maintenance / Closed 行为
 
 ## 启动世界
 

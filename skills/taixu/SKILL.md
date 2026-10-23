@@ -1,28 +1,40 @@
 ---
 name: taixu
 version: 1.0.0
-description: Use when building or modifying a Rust game backend with the taixu library ("太虚", taixu, game backend, quests/tasks, inventory, wallet, shop, trading, rooms, chat, friends, leaderboards, achievements, announcements, NPC agents, snapshots). Covers the complete facade API, JSON wire contracts, atomicity, locks, persistence, configuration, errors, recipes and verification.
+description: Use when building a Rust game backend application that depends on the taixu crate ("太虚", taixu, game backend, quests/tasks, inventory, wallet, shop, trading, rooms, chat, friends, leaderboards, achievements, announcements, NPC agents, snapshots). Covers the complete public facade API, JSON wire contracts, atomicity, locks, persistence, configuration, errors, recipes and verification without requiring the taixu source tree.
 ---
 
-# Using taixu
+# Using taixu from a crate
 
-`taixu` is a synchronous, in-memory, single-process game backend **library**.
-The host owns networking, authentication, async runtimes and persistence.
+This skill is for applications that depend on the published **taixu crate**.
+It is not a guide to editing taixu's internals. You do **not** need the taixu
+source tree: this file, the bundled `references/` and `cargo doc` are enough to
+build a game.
+
+`taixu` is a synchronous, in-memory, single-process game backend library. The
+host owns networking, authentication, async runtimes and persistence.
 Everything game-side goes through one `Game` facade, which holds a single
 `parking_lot::RwLock<GameState>`.
 
 ## First moves
 
-1. Read `Cargo.toml` and confirm how `taixu` is linked.
+1. Add `taixu = "0.1"` to the application's dependencies (MSRV 1.89).
 2. Use `taixu::prelude::*` for the facade and domain types.
-3. For any non-trivial task, read the canonical reference page listed in
-   [Reference map](#reference-map) before editing.
-4. Follow the feature workflow at the end of this skill. Run
-   `scripts/check.sh` before declaring work done.
+3. For non-trivial behavior, read the relevant bundled reference listed in
+   [Reference map](#reference-map).
+4. Build the game with the recipes below; run **your application's**
+   `cargo fmt`, `cargo clippy` and `cargo test`.
+5. Do not inspect or depend on the taixu source tree. If a behavior is unclear,
+   `cargo doc --no-deps --open` and `references/` are the API contract.
 
 ```toml
 [dependencies]
-taixu = { path = "../taixu" } # or a released version
+taixu = "0.1"
+
+# Optional, depending on your host:
+# async-trait = "0.1"   # custom NPC agents
+# serde_json = "1"      # snapshots
+# tokio / async-std     # your chosen async runtime
 ```
 
 ```rust
@@ -49,8 +61,8 @@ not validate tokens/sessions.
   agents are not part of `GameState`.
 - **Do not bypass the facade** to mutate `GameState` unless you own the
   persistence/migration pipeline.
-- **Behavior changes need tests**, especially JSON contract and atomicity
-  tests.
+- **Your game logic needs tests**, especially atomicity, concurrency, time
+  boundaries and snapshot round-trips.
 
 ## Minimal world
 
@@ -419,7 +431,7 @@ original game instead of `SystemClock`.
 - Errors are not serde types; map `GameError` to protocol error codes.
 
 Full details and examples: `references/json-contracts.md`.
-Wire shapes are guarded by `tests/json_contracts.rs`.
+These shapes are stable for the 0.1.x line; full examples are in `references/json-contracts.md`.
 
 ## Locks, atomicity and errors
 
@@ -455,7 +467,8 @@ Full matrix: `references/errors.md`.
 
 ## Reference map
 
-Bundled with this skill (copied from the taixu repository `docs/`):
+All required references are bundled here. Using the crate never requires
+reading the taixu source tree.
 
 | Need | File |
 | --- | --- |
@@ -469,38 +482,36 @@ Bundled with this skill (copied from the taixu repository `docs/`):
 | Error variants and atomicity | `references/errors.md` |
 | Common flows | `references/cookbook.md` |
 | Behavior changes | `references/CHANGELOG.md` |
-| Runnable examples | <https://github.com/paxoscn/taixu/tree/main/examples> |
-| Acceptance tests | <https://github.com/paxoscn/taixu/tree/main/tests> |
+| Generated rustdoc | run `cargo doc --no-deps --open` |
 
-Examples in the taixu repository: `basic`, `tasks`, `trade_rollback`,
-`npc_actions`, `persistence`, `region_matrix`, `channels`.
+## Application workflow
 
-## Feature workflow
+1. At boot, choose `GameConfig`; create `Game`; register regions, items,
+   resources, skins, shops, tasks, achievements, collections, leaderboards and
+   NPC definitions. Register catalogs before granting or purchasing them.
+2. Authenticate outside taixu. Pass the trusted `AccountId` into facade calls.
+   Use `ensure_account` for lazy first login.
+3. For each gameplay event, call the narrow facade API and map `GameError` to
+   your protocol. Use `record_event` for achievements + tasks.
+4. Run host maintenance: presence cleanup via `last_seen_ms`, `expire_trades`,
+   announcement windows and periodic `snapshot()`/`save_to`.
+5. Test game logic with `ManualClock`; test snapshot round-trips and version
+   handling. Run your own `cargo fmt`, `cargo clippy` and `cargo test`.
+6. If an API is missing, consult the bundled references or open an upstream
+   issue; do not fork/copy taixu internals into the application.
 
-When changing the taixu library itself:
+## Using this skill without upstream source
 
-1. Read the relevant module and bundled reference; identify the state machine
-   and all side effects.
-2. Implement inside `Game` under one write lock. For multi-step mutations,
-   validate first and mutate clones before committing.
-3. Keep `GameState` serde-compatible; bump `GAME_STATE_VERSION` for breaking
-   snapshot changes and document migration.
-4. Add a regression test (atomicity, boundary, concurrency, or wire shape).
-5. Update JSON contract tests if a client-visible type changed.
-6. Update the relevant repository `docs/*.md`, `CHANGELOG.md`, and README if
-   user-facing, then run `scripts/sync-docs.sh` to refresh bundled references.
-7. Run the full check:
-
-```bash
-skills/taixu/scripts/check.sh
-```
-
-The script checks that bundled references are in sync, then runs fmt, clippy,
-all tests, README doctests, strict rustdoc and all examples.
-
-When using taixu from a consumer application, run your own `cargo test`,
-`cargo clippy` and any integration tests; the maintainer check script lives here
-but is not required in the consumer project.
+- The recipes and references use only public crate APIs.
+- `GameState` fields are public for persistence/inspection, but mutate state
+  through `Game` methods; bypassing them skips validation and atomicity.
+- `GameError` is the complete domain error type; `references/errors.md` maps
+  operations to failures and side effects.
+- Wire formats in `references/json-contracts.md` are the contract for your
+  client; you do not need to read serde implementations.
+- NPC prompt/action handling is documented in `references/npc.md`; no need to
+  read the runtime source.
+- Snapshot migration rules are in `references/persistence.md`.
 
 ## Pitfalls checklist
 
